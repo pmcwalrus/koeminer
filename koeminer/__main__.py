@@ -16,7 +16,6 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("koeminer")
     app.setOrganizationName("koeminer")
-    app.setStyle("Fusion")
     app.setStyleSheet(STYLE)
     directory = args.data_dir or Path(QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppLocalDataLocation))
     directory.mkdir(parents=True, exist_ok=True)

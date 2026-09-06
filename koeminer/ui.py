@@ -18,27 +18,7 @@ from .core import AudioCache, Corpus, Mapping, Settings, enrich, plain
 from .proxy import Proxy, Selection
 from .images import ImageCache, ImageSearch
 
-STYLE = """
-QWidget { background: #10181e; color: #e8eff0; font-family: 'Segoe UI'; font-size: 14px; }
-QLabel { background: transparent; }
-QLabel#brand { font-size: 36px; font-weight: 700; color: #7ae0c3; }
-QLabel#title { font-size: 24px; font-weight: 600; }
-QLabel#muted { color: #a2b5bd; }
-QLabel#japanese { font-size: 23px; }
-QFrame#card { background: #1a272f; border: 1px solid #30434d; border-radius: 12px; }
-QLineEdit, QComboBox, QSpinBox { background: #1a272f; border: 1px solid #40555e; border-radius: 6px; padding: 9px; }
-QPushButton { background: #273a44; border: 1px solid #40555e; border-radius: 7px; padding: 9px 15px; }
-QPushButton:hover { background: #36505d; }
-QPushButton#primary { background: #79dfc2; color: #10231e; border: none; font-weight: 600; }
-QPushButton#primary:hover { background: #a2f0d9; }
-QPushButton:disabled { color: #75838a; background: #263039; }
-QTabWidget::pane { border: none; }
-QTabBar::tab { padding: 12px 24px; background: #18252d; }
-QTabBar::tab:selected { color: #7ae0c3; border-bottom: 2px solid #7ae0c3; }
-QScrollArea { border: none; }
-QCheckBox { spacing: 10px; }
-QToolTip { background: #273a44; color: white; border: none; }
-"""
+STYLE = ""  # Use the operating system palette and standard Qt controls.
 
 
 def label(text, name=None):
@@ -58,13 +38,22 @@ def button(text, callback, primary=False):
     return widget
 
 
+def scrollable(widget):
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+    scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+    scroll.setWidget(widget)
+    return scroll
+
+
 def app_icon():
     pixmap = QPixmap(64, 64)
-    pixmap.fill(QColor("#10181e"))
+    pixmap.fill(QApplication.palette().window().color())
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     painter.setPen(Qt.PenStyle.NoPen)
-    painter.setBrush(QColor("#79dfc2"))
+    painter.setBrush(QApplication.palette().windowText().color())
     for x, height in [(12, 18), (23, 36), (34, 48), (45, 26)]:
         painter.drawRoundedRect(x, (64 - height) // 2, 7, height, 3, 3)
     painter.end()
@@ -102,6 +91,7 @@ class Picker(QDialog):
         self.owner = owner
         self.selection = selection
         self.closed = False
+        self.submitting = False
         self.generation = 0
         self.audio_generation = 0
         self.image_generation = 0
@@ -112,13 +102,22 @@ class Picker(QDialog):
         self.resize(960, 850 if self.with_images else 700)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        self.setWindowFlag(Qt.WindowType.WindowMinMaxButtonsHint, True)
+        self.setSizeGripEnabled(True)
+        self.setMinimumSize(360, 280)
         self.player = QMediaPlayer(self)
         self.output = QAudioOutput(self)
         self.player.setAudioOutput(self.output)
         self.player.errorOccurred.connect(lambda *_: self.info.setText("Не удалось воспроизвести аудио: " + self.player.errorString()))
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(26, 24, 26, 24)
-        layout.setSpacing(15)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        content = QWidget()
+        content.setMinimumSize(640, 600)
+        self.content_scroll = scrollable(content)
+        outer.addWidget(self.content_scroll)
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
         layout.addWidget(label("Пример и картинка для карточки" if self.with_images else "Выберите голос для карточки", "title"))
         subtitle = (f"{selection.note['modelName']} · {selection.note.get('deckName', '')}" if selection
                     else "Предварительный просмотр · карточки в Anki не создаются")
@@ -129,7 +128,7 @@ class Picker(QDialog):
         self.query.returnPressed.connect(self.search)
         row.addWidget(self.query)
         row.addWidget(button("Найти", self.search, True))
-        row.addWidget(button("■ Стоп", self.stop_audio))
+        row.addWidget(button("Стоп", self.stop_audio))
         self.sentence_search_row = row
         layout.addLayout(row)
         self.info = label("Загрузка предложений…", "muted")
@@ -158,7 +157,7 @@ class Picker(QDialog):
             clear_row.addWidget(button("Убрать картинку", self.clear_picture))
             clear_row.addStretch()
             if selection:
-                clear_row.addWidget(button("Создать карточку", self.finish_selection, True))
+                clear_row.addWidget(button("Добавить только выбранное", self.finish_selection))
             layout.addLayout(clear_row)
         footer = QHBoxLayout()
         self.source_label = label("Источник: sentencesearch.neocities.org", "muted")
@@ -172,6 +171,12 @@ class Picker(QDialog):
         self.timer.timeout.connect(self.check_expired)
         self.timer.start(1000)
         QTimer.singleShot(0, self.search)
+        if self.with_images:
+            QTimer.singleShot(0, self.preload_images)
+
+    def preload_images(self):
+        if not self.closed and self.image_generation == 0:
+            self.search_images()
 
     def image_tab(self, query):
         widget = QWidget()
@@ -200,7 +205,7 @@ class Picker(QDialog):
         self.info.setVisible(index == 0)
         self.source_label.setText("Источник: Wikimedia Commons" if index == 1 else "Источник: sentencesearch.neocities.org")
         if index == 1 and self.image_generation == 0:
-            self.search_images()
+            self.preload_images()
 
     def search_images(self):
         self.image_generation += 1
@@ -226,7 +231,7 @@ class Picker(QDialog):
                                 else "Картинок не найдено. Попробуйте другой запрос, например английский перевод.")
         for index, picture in enumerate(rows):
             frame = QFrame()
-            frame.setObjectName("card")
+            frame.setFrameShape(QFrame.Shape.StyledPanel)
             box = QVBoxLayout(frame)
             thumbnail = label("Загрузка…")
             thumbnail.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -261,8 +266,18 @@ class Picker(QDialog):
             thumbnail.setToolTip(error)
 
     def choose_picture(self, picture):
+        if self.closed or self.submitting:
+            return
         self.selected_picture = picture
         self.update_selection()
+        self.advance_selection(0)
+
+    def advance_selection(self, next_tab):
+        self.stop_audio()
+        if self.selected_sentence is not None and self.selected_picture is not None:
+            self.finish_selection()
+        else:
+            self.tabs.setCurrentIndex(next_tab)
 
     def clear_picture(self):
         self.selected_picture = None
@@ -278,8 +293,14 @@ class Picker(QDialog):
         self.selection_info.setText(f"Предложение: {sentence}\nКартинка: {picture}")
 
     def finish_selection(self):
-        if self.closed or self.selection.expired or self.selection.done.is_set():
+        if self.closed or self.submitting:
             return
+        if self.selection is None:
+            self.close()
+            return
+        if self.selection.expired or self.selection.done.is_set():
+            return
+        self.submitting = True
         sentence, picture = self.selected_sentence, self.selected_picture
         def prepare():
             if sentence:
@@ -328,14 +349,14 @@ class Picker(QDialog):
                           else "Ничего не найдено. Попробуйте другой запрос или начальную форму слова.")
         for sentence in rows:
             frame = QFrame()
-            frame.setObjectName("card")
+            frame.setFrameShape(QFrame.Shape.StyledPanel)
             box = QVBoxLayout(frame)
-            box.setContentsMargins(18, 15, 18, 15)
+            box.setContentsMargins(10, 8, 10, 8)
             box.addWidget(label(sentence.japanese, "japanese"))
             box.addWidget(label(sentence.english, "muted"))
             actions = QHBoxLayout()
             actions.addWidget(label(sentence.source, "muted"), 1)
-            actions.addWidget(button("▶ Слушать", lambda _, s=sentence: self.play(s)))
+            actions.addWidget(button("Слушать", lambda _, s=sentence: self.play(s)))
             actions.addWidget(button("Выбрать", lambda _, s=sentence: self.choose(s), True))
             box.addLayout(actions)
             self.results.addWidget(frame)
@@ -358,9 +379,12 @@ class Picker(QDialog):
             self.info.setText("Аудио недоступно: " + error)
 
     def choose(self, sentence):
+        if self.closed or self.submitting:
+            return
         if self.with_images:
             self.selected_sentence = sentence
             self.update_selection()
+            self.advance_selection(1)
             return
         if self.selection:
             if self.selection.expired or self.selection.done.is_set():
@@ -380,6 +404,7 @@ class Picker(QDialog):
 
     def choose_error(self, error):
         if not self.closed:
+            self.submitting = False
             self.setEnabled(True)
             self.info.setText("Не удалось загрузить запись. Выберите другую: " + error)
             if self.with_images:
@@ -423,15 +448,12 @@ class MainWindow(QMainWindow):
         self.resize(880, 760)
         root = QWidget()
         layout = QVBoxLayout(root)
-        layout.setContentsMargins(32, 25, 32, 25)
-        layout.setSpacing(16)
-        layout.addWidget(label("koeminer", "brand"))
-        layout.addWidget(label("Живые предложения. В ваших карточках.", "title"))
-        layout.addWidget(label("Yomitan → выбор предложения и аудио → Anki", "muted"))
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(8)
         tabs = QTabWidget()
         home = QWidget()
         home_layout = QVBoxLayout(home)
-        home_layout.setSpacing(18)
+        home_layout.setSpacing(10)
         self.status = label("Запуск…")
         home_layout.addWidget(self.status)
         self.address = label("")
@@ -446,7 +468,7 @@ class MainWindow(QMainWindow):
         self.demo_query.setPlaceholderText("Слово для пробного поиска")
         self.demo_query.returnPressed.connect(self.preview)
         row.addWidget(self.demo_query)
-        row.addWidget(button("Попробовать поиск и аудио", self.preview, True))
+        row.addWidget(button("Открыть поиск", self.preview, True))
         home_layout.addLayout(row)
         home_layout.addWidget(label("Предварительный просмотр работает без Anki и не создаёт карточек.", "muted"))
         home_layout.addWidget(button("Проверить AnkiConnect", self.check_anki))
@@ -455,7 +477,10 @@ class MainWindow(QMainWindow):
         tabs.addTab(self.settings_widget(), "Настройки")
         layout.addWidget(tabs, 1)
         layout.addWidget(label("Sentence Search · аудио сохраняется в медиатеке Anki для офлайн-повторения", "muted"))
-        self.setCentralWidget(root)
+        root.setMinimumSize(640, 700)
+        self.content_scroll = scrollable(root)
+        self.setCentralWidget(self.content_scroll)
+        self.setMinimumSize(360, 280)
         self.tray = QSystemTrayIcon(self.windowIcon(), self)
         self.tray.setToolTip("koeminer")
         menu = QMenu(self)
@@ -471,7 +496,7 @@ class MainWindow(QMainWindow):
         try:
             self.proxy.start()
             self.address.setText(f"Адрес для Yomitan: http://127.0.0.1:{self.settings.port}")
-            self.set_status("● koeminer готов · ожидает карточку от Yomitan")
+            self.set_status("koeminer готов · ожидает карточку от Yomitan")
         except Exception as exc:
             self.set_status("Не удалось запустить сервер: " + str(exc))
 
@@ -502,7 +527,7 @@ class MainWindow(QMainWindow):
     def settings_widget(self):
         widget = QWidget()
         form = QFormLayout(widget)
-        form.setVerticalSpacing(13)
+        form.setVerticalSpacing(8)
         self.upstream = QLineEdit(self.settings.upstream)
         self.port = QSpinBox()
         self.port.setRange(1024, 65535)
@@ -615,7 +640,7 @@ class MainWindow(QMainWindow):
     def check_anki(self):
         self.set_status("Проверка AnkiConnect…")
         self.jobs.run(lambda: self.proxy.call("version"),
-                      lambda version: self.set_status(f"● AnkiConnect подключён · API {version}"), self.set_status)
+                      lambda version: self.set_status(f"AnkiConnect подключён · API {version}"), self.set_status)
 
     def closeEvent(self, event):
         if self.tray.isVisible():

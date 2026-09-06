@@ -14,8 +14,9 @@ from koeminer.core import Mapping, Sentence, Settings
 from koeminer.ui import MainWindow
 
 
-@pytest.mark.parametrize("with_image", [False, True])
-def test_http_opens_picker_and_selection_returns_note_id(tmp_path, with_image):
+@pytest.mark.parametrize("order", ["audio_only", "audio_first", "image_first"])
+def test_http_opens_picker_and_selection_returns_note_id(tmp_path, order):
+    with_image = order != "audio_only"
     app = QApplication.instance() or QApplication([])
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
@@ -28,6 +29,7 @@ def test_http_opens_picker_and_selection_returns_note_id(tmp_path, with_image):
     audio.write_bytes(b"test audio")
     window.audio.fetch = lambda _: audio
     window.images.fetch = lambda _: audio
+    window.image_search.search = lambda _: []
     calls = []
 
     def upstream(request):
@@ -54,18 +56,103 @@ def test_http_opens_picker_and_selection_returns_note_id(tmp_path, with_image):
             app.processEvents()
             if window.pickers and window.pickers[0].results.count() and not chosen:
                 chosen = True
-                window.pickers[0].choose(sentence)
+                picker = window.pickers[0]
                 if with_image:
                     from koeminer.images import Picture
-                    window.pickers[0].choose_picture(Picture("cat", "https://upload.wikimedia.org/cat.jpg", "https://commons.wikimedia.org/wiki/File:Cat.jpg"))
-                    assert not result  # Choosing a sentence alone must not submit the card.
-                    window.pickers[0].finish_selection()
+                    picture = Picture("cat", "https://upload.wikimedia.org/cat.jpg", "https://commons.wikimedia.org/wiki/File:Cat.jpg")
+                    if order == "audio_first":
+                        picker.choose(sentence)
+                        assert picker.tabs.currentIndex() == 1
+                        assert not result
+                        picker.choose_picture(picture)
+                    else:
+                        picker.tabs.setCurrentIndex(1)
+                        picker.choose_picture(picture)
+                        assert picker.tabs.currentIndex() == 0
+                        assert not result
+                        picker.choose(sentence)
+                else:
+                    picker.choose(sentence)
             time.sleep(0.01)
         assert chosen
         assert result == {"response": 98765}
+        assert picker.closed
+        assert sum(call["action"] == "addNote" for call in calls) == 1
         assert calls[-1]["params"]["note"]["fields"]["SentenceAudio"] == "[sound:cat.mp3]"
         if with_image:
             assert '<img src="cat.mp3">' in calls[-1]["params"]["note"]["fields"]["Picture"]
+    finally:
+        window.shutdown()
+        window.tray.hide()
+        window.deleteLater()
+        app.processEvents()
+
+
+def test_small_windows_scroll_and_can_grow(tmp_path, monkeypatch):
+    from koeminer.proxy import Proxy
+    monkeypatch.setattr(Proxy, "start", lambda _: None)
+    monkeypatch.setattr(Proxy, "stop", lambda _: None)
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(tmp_path)
+    window.corpus.rows = [Sentence("猫", "cat", "fixture", "cat.mp3")]
+    window.image_search.search = lambda _: []
+    window.show()
+    window.preview()
+    picker = window.pickers[0]
+    try:
+        for widget in (window, picker):
+            widget.resize(420, 320)
+        for _ in range(10):
+            app.processEvents()
+        for widget in (window, picker):
+            assert widget.width() == 420
+            assert widget.height() == 320
+            assert widget.content_scroll.horizontalScrollBar().maximum() > 0
+            assert widget.content_scroll.verticalScrollBar().maximum() > 0
+            widget.resize(1200, 1000)
+        for _ in range(10):
+            app.processEvents()
+        for widget in (window, picker):
+            assert widget.width() == 1200
+            assert widget.content_scroll.horizontalScrollBar().maximum() == 0
+    finally:
+        window.shutdown()
+        window.tray.hide()
+        window.deleteLater()
+        app.processEvents()
+
+
+def test_images_load_while_sentence_tab_is_open(tmp_path, monkeypatch):
+    from koeminer.proxy import Proxy
+    from koeminer.images import Picture
+    monkeypatch.setattr(Proxy, "start", lambda _: None)
+    monkeypatch.setattr(Proxy, "stop", lambda _: None)
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(tmp_path)
+    window.corpus.rows = [Sentence("猫", "cat", "fixture", "cat.mp3")]
+    requests = []
+    loaded = threading.Event()
+    picture = Picture("cat", "https://upload.wikimedia.org/cat.jpg", "https://commons.wikimedia.org/wiki/File:Cat.jpg")
+    def search(query):
+        requests.append(query)
+        return [picture]
+    def fetch(_):
+        loaded.set()
+        return tmp_path / "missing-thumbnail.jpg"
+    window.image_search.search = search
+    window.images.fetch = fetch
+    window.preview()
+    picker = window.pickers[0]
+    try:
+        deadline = time.monotonic() + 5
+        while not loaded.is_set() and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        assert loaded.is_set()
+        assert picker.tabs.currentIndex() == 0
+        picker.tabs.setCurrentIndex(1)
+        app.processEvents()
+        assert len(requests) == 1
     finally:
         window.shutdown()
         window.tray.hide()

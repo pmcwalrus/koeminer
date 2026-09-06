@@ -11,7 +11,6 @@ from PySide6.QtWidgets import QApplication
 from koeminer.ui import MainWindow, STYLE
 
 app = QApplication([])
-app.setStyle("Fusion")
 app.setStyleSheet(STYLE)
 window = MainWindow(Path(".dev"))
 window.show()

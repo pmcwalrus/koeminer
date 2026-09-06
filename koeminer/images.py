@@ -64,11 +64,18 @@ class ImageCache:
     def __init__(self, directory: Path):
         self.directory = directory
         self.lock = threading.Lock()
+        self.file_locks = {}
+        self.download_slots = threading.BoundedSemaphore(3)
 
     def fetch(self, picture: Picture) -> Path:
         url = trusted_url(picture.url)
         name = "koeminer_image_" + hashlib.sha256(url.encode()).hexdigest()[:24] + ".jpg"
+        target = self.directory / name
+        if target.exists():
+            return target
         with self.lock:
+            file_lock = self.file_locks.setdefault(name, threading.Lock())
+        with file_lock, self.download_slots:
             self.directory.mkdir(parents=True, exist_ok=True)
             target = self.directory / name
             if target.exists():

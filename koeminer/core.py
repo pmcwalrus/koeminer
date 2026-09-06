@@ -165,11 +165,7 @@ def enrich(note: dict, mapping: Mapping, sentence: Sentence | None, filename: st
     if picture is not None:
         if not mapping.image:
             raise ValueError("Не настроено поле картинки.")
-        from .images import trusted_url
-        source = html.escape(trusted_url(picture.source_url, False), quote=True)
-        credit = html.escape(" · ".join(x for x in (picture.artist, picture.license) if x))
-        updates[mapping.image] = (f'<img src="{html.escape(image_filename, quote=True)}"><br>'
-                                  f'<small><a href="{source}">Wikimedia Commons</a> · {credit}</small>')
+        updates[mapping.image] = f'<img src="{html.escape(image_filename, quote=True)}">'
     for name, value in updates.items():
         if name not in fields:
             raise ValueError(f"В заметке нет поля «{name}». Проверьте настройки koeminer и Yomitan.")

@@ -19,12 +19,11 @@ def test_existing_settings_still_load(tmp_path):
         Mapping(image="Expression").validate()
 
 
-def test_image_only_preserves_sentence_and_escapes_credit():
+def test_image_only_preserves_sentence_and_has_no_caption():
     note = {"fields": {"Sentence": "original", "Picture": "old", "WordAudio": "word"},
             "picture": [{"fields": ["Picture", "Other"], "filename": "original.jpg"}]}
     result = enrich(note, Mapping(image="Picture"), None, picture=PICTURE, image_filename="cat.jpg")
-    assert '<img src="cat.jpg">' in result["fields"]["Picture"]
-    assert "A &amp; B" in result["fields"]["Picture"]
+    assert result["fields"]["Picture"] == '<img src="cat.jpg">'
     assert result["fields"]["Sentence"] == "original"
     assert result["picture"][0]["fields"] == ["Other"]
     assert note["fields"]["Picture"] == "old"
@@ -80,3 +79,29 @@ def test_cache_rejects_redirect_to_localhost(tmp_path, monkeypatch):
     monkeypatch.setattr(httpx, "Client", lambda **_: client)
     with pytest.raises(ValueError):
         ImageCache(tmp_path).fetch(PICTURE)
+
+
+def test_downloads_overlap_and_same_image_is_fetched_once(tmp_path, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    from dataclasses import replace
+    image = QImage(16, 16, QImage.Format.Format_RGB32)
+    image.fill(QColor("red"))
+    sample = tmp_path / "fixture.png"
+    image.save(str(sample))
+    data = sample.read_bytes()
+    barrier = threading.Barrier(3)
+    calls = []
+    real_client = httpx.Client
+    def handle(request):
+        calls.append(str(request.url))
+        barrier.wait(timeout=5)  # Serial fetching cannot pass this barrier.
+        return httpx.Response(200, content=data)
+    monkeypatch.setattr(httpx, "Client", lambda **_: real_client(transport=httpx.MockTransport(handle)))
+    cache = ImageCache(tmp_path / "images")
+    pictures = [replace(PICTURE, url=f"https://upload.wikimedia.org/{i}.jpg") for i in range(3)]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        paths = list(pool.map(cache.fetch, pictures + [pictures[0]]))
+    assert len(calls) == 3
+    assert paths[0] == paths[3]
+    assert all(path.exists() for path in paths)

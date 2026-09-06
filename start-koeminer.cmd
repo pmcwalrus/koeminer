@@ -1,6 +1,8 @@
 @echo off
 cd /d "%~dp0"
-if exist "dist\local-simple\koeminer\koeminer.exe" (
+if exist "dist\local-sources\koeminer\koeminer.exe" (
+    start "" "dist\local-sources\koeminer\koeminer.exe"
+) else if exist "dist\local-simple\koeminer\koeminer.exe" (
     start "" "dist\local-simple\koeminer\koeminer.exe"
 ) else if exist "dist\local-preload\koeminer\koeminer.exe" (
     start "" "dist\local-preload\koeminer\koeminer.exe"

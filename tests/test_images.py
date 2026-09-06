@@ -34,18 +34,33 @@ def test_skip_picture_preserves_existing_image():
     assert enrich(note, Mapping(image="Picture"), None) == note
 
 
-def test_search_returns_ten_ranked_results(monkeypatch):
+def test_search_returns_five_ranked_results(monkeypatch):
     def get(url, **kwargs):
-        assert kwargs["params"]["gsrlimit"] == 10
+        assert kwargs["params"]["gsrlimit"] == 5
         pages = {str(i): {"title": f"File:cat{i}.jpg", "index": i,
                          "imageinfo": [{"thumburl": PICTURE.url, "descriptionurl": PICTURE.source_url}]}
                  for i in reversed(range(12))}
         return httpx.Response(200, json={"query": {"pages": pages}}, request=httpx.Request("GET", url))
     monkeypatch.setattr(httpx, "get", get)
     rows = ImageSearch().search("猫")
-    assert len(rows) == 10
+    assert len(rows) == 5
     assert rows[0].title == "cat0.jpg"
     assert ImageSearch().search(" ") == []
+
+
+def test_openverse_limits_to_five_and_excludes_wikimedia(monkeypatch):
+    import uuid
+    def get(url, **kwargs):
+        assert kwargs["params"]["page_size"] == 5
+        assert kwargs["params"]["excluded_source"] == "wikimedia"
+        rows = [{"id": str(uuid.uuid4()), "title": "cat", "source": "flickr"} for _ in range(7)]
+        rows.insert(0, {"source": "wikimedia"})
+        return httpx.Response(200, json={"results": rows}, request=httpx.Request("GET", url))
+    monkeypatch.setattr(httpx, "get", get)
+    rows = ImageSearch().search("cat", "Openverse")
+    assert len(rows) == 5
+    assert all(row.provider == "Openverse" for row in rows)
+    assert all(row.url.startswith("https://api.openverse.org/v1/images/") for row in rows)
 
 
 def test_cache_decodes_image_and_reuses_file(tmp_path, monkeypatch):

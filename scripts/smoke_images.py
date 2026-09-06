@@ -29,7 +29,7 @@ def check():
 
 def timeout():
     picker.grab().save(".dev/images-picker.png")
-    print("Image load timed out: " + picker.image_info.text(), flush=True)
+    print("Image load timed out: " + "; ".join(status.text() for status in picker.source_status.values()), flush=True)
     window.shutdown()
     app.exit(1)
 

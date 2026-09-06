@@ -188,7 +188,7 @@ class Picker(QDialog):
         row.addWidget(self.image_query)
         row.addWidget(button("Найти 10 картинок", self.search_images, True))
         box.addLayout(row)
-        self.image_info = label("Поиск изображений в Wikimedia Commons", "muted")
+        self.image_info = label("По 5 картинок из Wikimedia Commons и Openverse", "muted")
         box.addWidget(self.image_info)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -203,7 +203,7 @@ class Picker(QDialog):
         for i in range(self.sentence_search_row.count()):
             self.sentence_search_row.itemAt(i).widget().setVisible(index == 0)
         self.info.setVisible(index == 0)
-        self.source_label.setText("Источник: Wikimedia Commons" if index == 1 else "Источник: sentencesearch.neocities.org")
+        self.source_label.setText("Wikimedia Commons / Openverse" if index == 1 else "Источник: sentencesearch.neocities.org")
         if index == 1 and self.image_generation == 0:
             self.preload_images()
 
@@ -211,24 +211,31 @@ class Picker(QDialog):
         self.image_generation += 1
         generation = self.image_generation
         query = self.image_query.text().strip()
-        self.image_info.setText("Ищем 10 картинок…")
+        self.image_info.setText("По 5 картинок из каждого источника. Результаты появляются независимо.")
         while self.image_results.count():
             item = self.image_results.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        self.owner.jobs.run(lambda: self.owner.image_search.search(query),
-                            lambda rows: self.show_images(rows, generation),
-                            lambda error: self.image_search_error(error, generation))
+        self.source_status = {}
+        for index, source in enumerate(self.owner.image_search.sources):
+            status = label(source + ": поиск…")
+            self.source_status[source] = status
+            self.image_results.addWidget(status, index * 3, 0, 1, 3)
+            self.owner.jobs.run(lambda s=source: self.owner.image_search.search(query, s),
+                                lambda rows, s=source: self.show_images(rows, generation, s),
+                                lambda error, s=source: self.image_search_error(error, generation, s))
 
-    def image_search_error(self, error, generation):
+    def image_search_error(self, error, generation, source):
         if not self.closed and generation == self.image_generation:
-            self.image_info.setText("Ошибка поиска: " + error)
+            self.source_status[source].setText(source + ": источник недоступен. Нажмите поиск для повтора.")
+            self.source_status[source].setToolTip(error)
 
-    def show_images(self, rows, generation):
+    def show_images(self, rows, generation, source):
         if self.closed or generation != self.image_generation:
             return
-        self.image_info.setText(f"Найдено {len(rows)} из 10 · Wikimedia Commons. Запрос можно изменить." if rows
-                                else "Картинок не найдено. Попробуйте другой запрос, например английский перевод.")
+        rows = rows[:5]
+        self.source_status[source].setText(f"{source}: {len(rows)} из 5" if rows else source + ": ничего не найдено. Измените запрос.")
+        offset = self.owner.image_search.sources.index(source) * 3 + 1
         for index, picture in enumerate(rows):
             frame = QFrame()
             frame.setFrameShape(QFrame.Shape.StyledPanel)
@@ -245,7 +252,7 @@ class Picker(QDialog):
             choose = button("Выбрать картинку", lambda _, p=picture: self.choose_picture(p), True)
             choose.setEnabled(False)
             box.addWidget(choose)
-            self.image_results.addWidget(frame, index // 3, index % 3)
+            self.image_results.addWidget(frame, offset + index // 3, index % 3)
             self.owner.jobs.run(lambda p=picture: self.owner.images.fetch(p),
                                 lambda path, t=thumbnail, b=choose: self.image_ready(path, t, b, generation),
                                 lambda error, t=thumbnail: self.thumbnail_error(error, t, generation))

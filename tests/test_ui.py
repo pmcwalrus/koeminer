@@ -29,7 +29,7 @@ def test_http_opens_picker_and_selection_returns_note_id(tmp_path, order):
     audio.write_bytes(b"test audio")
     window.audio.fetch = lambda _: audio
     window.images.fetch = lambda _: audio
-    window.image_search.search = lambda _: []
+    window.image_search.search = lambda *args: []
     calls = []
 
     def upstream(request):
@@ -95,7 +95,7 @@ def test_small_windows_scroll_and_can_grow(tmp_path, monkeypatch):
     app = QApplication.instance() or QApplication([])
     window = MainWindow(tmp_path)
     window.corpus.rows = [Sentence("猫", "cat", "fixture", "cat.mp3")]
-    window.image_search.search = lambda _: []
+    window.image_search.search = lambda *args: []
     window.show()
     window.preview()
     picker = window.pickers[0]
@@ -132,9 +132,13 @@ def test_images_load_while_sentence_tab_is_open(tmp_path, monkeypatch):
     window.corpus.rows = [Sentence("猫", "cat", "fixture", "cat.mp3")]
     requests = []
     loaded = threading.Event()
+    release_slow_source = threading.Event()
     picture = Picture("cat", "https://upload.wikimedia.org/cat.jpg", "https://commons.wikimedia.org/wiki/File:Cat.jpg")
-    def search(query):
+    def search(query, source):
         requests.append(query)
+        if source == "Openverse":
+            release_slow_source.wait(5)
+            raise ValueError("source unavailable")
         return [picture]
     def fetch(_):
         loaded.set()
@@ -150,10 +154,20 @@ def test_images_load_while_sentence_tab_is_open(tmp_path, monkeypatch):
             time.sleep(0.01)
         assert loaded.is_set()
         assert picker.tabs.currentIndex() == 0
+        assert "1 из 5" in picker.source_status["Wikimedia Commons"].text()
+        assert "поиск" in picker.source_status["Openverse"].text()
         picker.tabs.setCurrentIndex(1)
         app.processEvents()
-        assert len(requests) == 1
+        assert len(requests) == 2
+        release_slow_source.set()
+        deadline = time.monotonic() + 5
+        while "недоступен" not in picker.source_status["Openverse"].text() and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        assert "недоступен" in picker.source_status["Openverse"].text()
+        assert "1 из 5" in picker.source_status["Wikimedia Commons"].text()
     finally:
+        release_slow_source.set()
         window.shutdown()
         window.tray.hide()
         window.deleteLater()

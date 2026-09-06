@@ -1,6 +1,7 @@
 """Wikimedia Commons search and local image cache."""
 import hashlib
 import threading
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
@@ -21,24 +22,36 @@ class Picture:
     source_url: str
     artist: str = ""
     license: str = ""
+    provider: str = "Wikimedia Commons"
 
 
 def trusted_url(url, media=True):
     parsed = urlparse(url)
-    hosts = {"upload.wikimedia.org", "thumb.wikimedia.org"} if media else {"commons.wikimedia.org"}
+    hosts = {"upload.wikimedia.org", "thumb.wikimedia.org", "api.openverse.org"} if media else {"commons.wikimedia.org", "openverse.org"}
     if parsed.scheme != "https" or parsed.hostname not in hosts or parsed.username or parsed.port not in (None, 443):
-        raise ValueError("Недопустимый адрес изображения Wikimedia.")
+        raise ValueError("Недопустимый адрес изображения.")
+    if media and parsed.hostname == "api.openverse.org":
+        parts = parsed.path.strip("/").split("/")
+        if len(parts) != 4 or parts[:2] != ["v1", "images"] or parts[3] != "thumb":
+            raise ValueError("Недопустимый адрес миниатюры Openverse.")
+        uuid.UUID(parts[2])
     return url
 
 
 class ImageSearch:
-    def search(self, query: str) -> list[Picture]:
+    sources = ("Wikimedia Commons", "Openverse")
+
+    def search(self, query: str, source="Wikimedia Commons") -> list[Picture]:
         if not query.strip():
             return []
+        if source == "Openverse":
+            return self.search_openverse(query)
+        if source != "Wikimedia Commons":
+            raise ValueError("Неизвестный источник картинок.")
         response = httpx.get("https://commons.wikimedia.org/w/api.php", params={
             "action": "query", "format": "json", "generator": "search",
             "gsrsearch": query.strip() + " filetype:bitmap", "gsrnamespace": 6,
-            "gsrlimit": 10, "prop": "imageinfo", "iiprop": "url|extmetadata",
+            "gsrlimit": 5, "prop": "imageinfo", "iiprop": "url|extmetadata",
             "iiurlwidth": 960, "iiextmetadatafilter": "Artist|LicenseShortName",
         }, headers=HEADERS, timeout=30)
         response.raise_for_status()
@@ -57,7 +70,24 @@ class ImageSearch:
                                    trusted_url(info["descriptionurl"], False),
                                    plain(metadata.get("Artist", {}).get("value", "")),
                                    plain(metadata.get("LicenseShortName", {}).get("value", ""))))
-        return results[:10]
+        return results[:5]
+
+    def search_openverse(self, query):
+        response = httpx.get("https://api.openverse.org/v1/images/", params={
+            "q": query.strip(), "page_size": 5, "excluded_source": "wikimedia",
+        }, headers=HEADERS, timeout=15)
+        response.raise_for_status()
+        results = []
+        for item in response.json().get("results", []):
+            if item.get("source") == "wikimedia":
+                continue
+            identifier = str(uuid.UUID(item["id"]))
+            results.append(Picture(plain(item.get("title") or "Изображение"),
+                                   f"https://api.openverse.org/v1/images/{identifier}/thumb/",
+                                   f"https://openverse.org/image/{identifier}",
+                                   plain(item.get("creator") or ""),
+                                   str(item.get("license") or ""), "Openverse"))
+        return results[:5]
 
 
 class ImageCache:

@@ -24,13 +24,16 @@ class Mapping:
     audio: str = "SentenceAudio"
     translation: str = ""
     append: bool = False
+    image: str = ""
 
     def validate(self):
         targets = [self.sentence, self.audio] + ([self.translation] if self.translation else [])
+        if self.image:
+            targets.append(self.image)
         if not self.expression or not all(targets):
             raise ValueError("Укажите поля слова, предложения и аудио.")
         if len(set(targets)) != len(targets) or self.expression in targets:
-            raise ValueError("Для слова, предложения, аудио и перевода нужны разные поля.")
+            raise ValueError("Для слова, предложения, аудио, перевода и картинки нужны разные поля.")
 
 
 @dataclass
@@ -152,13 +155,21 @@ class AudioCache:
             return path
 
 
-def enrich(note: dict, mapping: Mapping, sentence: Sentence, filename: str):
+def enrich(note: dict, mapping: Mapping, sentence: Sentence | None, filename: str = "", picture=None, image_filename=""):
     mapping.validate()
     result = copy.deepcopy(note)
     fields = result["fields"]
-    updates = {mapping.sentence: html.escape(sentence.japanese), mapping.audio: f"[sound:{filename}]"}
-    if mapping.translation:
+    updates = {mapping.sentence: html.escape(sentence.japanese), mapping.audio: f"[sound:{filename}]"} if sentence else {}
+    if sentence and mapping.translation:
         updates[mapping.translation] = html.escape(sentence.english)
+    if picture is not None:
+        if not mapping.image:
+            raise ValueError("Не настроено поле картинки.")
+        from .images import trusted_url
+        source = html.escape(trusted_url(picture.source_url, False), quote=True)
+        credit = html.escape(" · ".join(x for x in (picture.artist, picture.license) if x))
+        updates[mapping.image] = (f'<img src="{html.escape(image_filename, quote=True)}"><br>'
+                                  f'<small><a href="{source}">Wikimedia Commons</a> · {credit}</small>')
     for name, value in updates.items():
         if name not in fields:
             raise ValueError(f"В заметке нет поля «{name}». Проверьте настройки koeminer и Yomitan.")

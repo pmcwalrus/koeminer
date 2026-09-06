@@ -11,6 +11,8 @@ from urllib.parse import urlparse
 import httpx
 
 from .core import AudioCache, Mapping, Sentence, Settings, enrich, plain
+from .images import Picture
+from . import __version__
 
 
 @dataclass
@@ -21,12 +23,14 @@ class Selection:
     sentence: Sentence | None = None
     cancelled: bool = True
     expired: bool = False
+    picture: Picture | None = None
 
 
 class Proxy:
-    def __init__(self, settings: Settings, audio: AudioCache, on_selection, on_status=lambda _: None):
+    def __init__(self, settings: Settings, audio: AudioCache, on_selection, on_status=lambda _: None, images=None):
         self.settings = settings
         self.audio = audio
+        self.images = images
         self.on_selection = on_selection
         self.on_status = on_status
         self.selection_lock = threading.Lock()
@@ -90,7 +94,7 @@ class Proxy:
                 raise ValueError(f"Настройте поля для типа заметки «{note['modelName']}» в koeminer.")
             mapping = copy.deepcopy(mapping)
             mapping.validate()
-            for name in (mapping.expression, mapping.sentence, mapping.audio, mapping.translation):
+            for name in (mapping.expression, mapping.sentence, mapping.audio, mapping.translation, mapping.image):
                 if name and name not in note["fields"]:
                     raise ValueError(f"В запросе Yomitan отсутствует поле «{name}».")
             if not plain(note["fields"][mapping.expression]):
@@ -107,6 +111,8 @@ class Proxy:
             if selection.cancelled:
                 raise ValueError("Создание карточки отменено в koeminer.")
             payload = copy.deepcopy(request)
+            filename = ""
+            image_filename = ""
             if selection.sentence is not None:
                 self.on_status("Сохранение аудио и карточки…")
                 path = self.audio.fetch(selection.sentence)
@@ -114,7 +120,16 @@ class Proxy:
                                      data=base64.b64encode(path.read_bytes()).decode())
                 if not isinstance(filename, str) or not filename or any(x in filename for x in "[]/\\"):
                     raise ValueError("AnkiConnect не подтвердил сохранение аудиофайла.")
-                payload["params"]["note"] = enrich(note, mapping, selection.sentence, filename)
+            if selection.picture is not None:
+                if self.images is None:
+                    raise ValueError("Кэш изображений недоступен.")
+                self.on_status("Сохранение картинки и карточки…")
+                path = self.images.fetch(selection.picture)
+                image_filename = self.call("storeMediaFile", filename=path.name,
+                                           data=base64.b64encode(path.read_bytes()).decode())
+                if not isinstance(image_filename, str) or not image_filename or any(x in image_filename for x in '[]/\\"<>'):
+                    raise ValueError("AnkiConnect не подтвердил сохранение картинки.")
+            payload["params"]["note"] = enrich(note, mapping, selection.sentence, filename, selection.picture, image_filename)
             response = self.upstream(payload)
             self.on_status(f"Карточка создана · {response['result']}" if not response["error"] else response["error"])
             return response
@@ -156,7 +171,7 @@ class Proxy:
                 self.reply({}, 200 if self.allowed() else 403)
 
             def do_GET(self):
-                self.reply({"application": "koeminer", "version": "0.1.0"}, 200 if self.allowed() else 403)
+                self.reply({"application": "koeminer", "version": __version__}, 200 if self.allowed() else 403)
 
             def do_POST(self):
                 if not self.allowed():

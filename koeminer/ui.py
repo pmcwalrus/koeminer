@@ -9,13 +9,14 @@ from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFormLayout, QFrame,
-    QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
+    QHBoxLayout, QGridLayout, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
     QPushButton, QScrollArea, QSpinBox, QSystemTrayIcon, QTabWidget,
     QVBoxLayout, QWidget,
 )
 
 from .core import AudioCache, Corpus, Mapping, Settings, enrich, plain
 from .proxy import Proxy, Selection
+from .images import ImageCache, ImageSearch
 
 STYLE = """
 QWidget { background: #10181e; color: #e8eff0; font-family: 'Segoe UI'; font-size: 14px; }
@@ -103,8 +104,12 @@ class Picker(QDialog):
         self.closed = False
         self.generation = 0
         self.audio_generation = 0
+        self.image_generation = 0
+        self.selected_sentence = None
+        self.selected_picture = None
+        self.with_images = selection is None or bool(selection.mapping.image)
         self.setWindowTitle("koeminer · Выбор предложения")
-        self.resize(850, 700)
+        self.resize(960, 850 if self.with_images else 700)
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self.player = QMediaPlayer(self)
@@ -114,7 +119,7 @@ class Picker(QDialog):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(26, 24, 26, 24)
         layout.setSpacing(15)
-        layout.addWidget(label("Выберите голос для карточки", "title"))
+        layout.addWidget(label("Пример и картинка для карточки" if self.with_images else "Выберите голос для карточки", "title"))
         subtitle = (f"{selection.note['modelName']} · {selection.note.get('deckName', '')}" if selection
                     else "Предварительный просмотр · карточки в Anki не создаются")
         layout.addWidget(label(subtitle, "muted"))
@@ -125,6 +130,7 @@ class Picker(QDialog):
         row.addWidget(self.query)
         row.addWidget(button("Найти", self.search, True))
         row.addWidget(button("■ Стоп", self.stop_audio))
+        self.sentence_search_row = row
         layout.addLayout(row)
         self.info = label("Загрузка предложений…", "muted")
         layout.addWidget(self.info)
@@ -134,13 +140,31 @@ class Picker(QDialog):
         self.results = QVBoxLayout(container)
         self.results.setAlignment(Qt.AlignmentFlag.AlignTop)
         scroll.setWidget(container)
-        layout.addWidget(scroll, 1)
+        if self.with_images:
+            self.tabs = QTabWidget()
+            self.tabs.addTab(scroll, "Предложения")
+            self.tabs.addTab(self.image_tab(query), "Картинки")
+            self.tabs.currentChanged.connect(self.tab_changed)
+            layout.addWidget(self.tabs, 1)
+        else:
+            layout.addWidget(scroll, 1)
         self.preview = label("", "muted")
         layout.addWidget(self.preview)
+        if self.with_images:
+            self.selection_info = label("Предложение не выбрано · картинка не выбрана", "muted")
+            layout.addWidget(self.selection_info)
+            clear_row = QHBoxLayout()
+            clear_row.addWidget(button("Убрать предложение", self.clear_sentence))
+            clear_row.addWidget(button("Убрать картинку", self.clear_picture))
+            clear_row.addStretch()
+            if selection:
+                clear_row.addWidget(button("Создать карточку", self.finish_selection, True))
+            layout.addLayout(clear_row)
         footer = QHBoxLayout()
-        footer.addWidget(label("Источник: sentencesearch.neocities.org", "muted"))
+        self.source_label = label("Источник: sentencesearch.neocities.org", "muted")
+        footer.addWidget(self.source_label)
         footer.addStretch()
-        if selection:
+        if selection and not self.with_images:
             footer.addWidget(button("Без примера", lambda: self.choose(None)))
         footer.addWidget(button("Отменить" if selection else "Закрыть", self.close))
         layout.addLayout(footer)
@@ -148,6 +172,129 @@ class Picker(QDialog):
         self.timer.timeout.connect(self.check_expired)
         self.timer.start(1000)
         QTimer.singleShot(0, self.search)
+
+    def image_tab(self, query):
+        widget = QWidget()
+        box = QVBoxLayout(widget)
+        row = QHBoxLayout()
+        self.image_query = QLineEdit(query)
+        self.image_query.setPlaceholderText("Запрос для 10 картинок — можно на английском")
+        self.image_query.returnPressed.connect(self.search_images)
+        row.addWidget(self.image_query)
+        row.addWidget(button("Найти 10 картинок", self.search_images, True))
+        box.addLayout(row)
+        self.image_info = label("Поиск изображений в Wikimedia Commons", "muted")
+        box.addWidget(self.image_info)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        container = QWidget()
+        self.image_results = QGridLayout(container)
+        self.image_results.setAlignment(Qt.AlignmentFlag.AlignTop)
+        scroll.setWidget(container)
+        box.addWidget(scroll)
+        return widget
+
+    def tab_changed(self, index):
+        for i in range(self.sentence_search_row.count()):
+            self.sentence_search_row.itemAt(i).widget().setVisible(index == 0)
+        self.info.setVisible(index == 0)
+        self.source_label.setText("Источник: Wikimedia Commons" if index == 1 else "Источник: sentencesearch.neocities.org")
+        if index == 1 and self.image_generation == 0:
+            self.search_images()
+
+    def search_images(self):
+        self.image_generation += 1
+        generation = self.image_generation
+        query = self.image_query.text().strip()
+        self.image_info.setText("Ищем 10 картинок…")
+        while self.image_results.count():
+            item = self.image_results.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        self.owner.jobs.run(lambda: self.owner.image_search.search(query),
+                            lambda rows: self.show_images(rows, generation),
+                            lambda error: self.image_search_error(error, generation))
+
+    def image_search_error(self, error, generation):
+        if not self.closed and generation == self.image_generation:
+            self.image_info.setText("Ошибка поиска: " + error)
+
+    def show_images(self, rows, generation):
+        if self.closed or generation != self.image_generation:
+            return
+        self.image_info.setText(f"Найдено {len(rows)} из 10 · Wikimedia Commons. Запрос можно изменить." if rows
+                                else "Картинок не найдено. Попробуйте другой запрос, например английский перевод.")
+        for index, picture in enumerate(rows):
+            frame = QFrame()
+            frame.setObjectName("card")
+            box = QVBoxLayout(frame)
+            thumbnail = label("Загрузка…")
+            thumbnail.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            thumbnail.setFixedSize(240, 160)
+            box.addWidget(thumbnail, alignment=Qt.AlignmentFlag.AlignHCenter)
+            title = label(picture.title[:65])
+            title.setFixedHeight(42)
+            title.setToolTip(picture.title)
+            box.addWidget(title)
+            box.addWidget(label(picture.license, "muted"))
+            choose = button("Выбрать картинку", lambda _, p=picture: self.choose_picture(p), True)
+            choose.setEnabled(False)
+            box.addWidget(choose)
+            self.image_results.addWidget(frame, index // 3, index % 3)
+            self.owner.jobs.run(lambda p=picture: self.owner.images.fetch(p),
+                                lambda path, t=thumbnail, b=choose: self.image_ready(path, t, b, generation),
+                                lambda error, t=thumbnail: self.thumbnail_error(error, t, generation))
+
+    def image_ready(self, path, thumbnail, choose, generation):
+        if self.closed or generation != self.image_generation:
+            return
+        pixmap = QPixmap(str(path))
+        if pixmap.isNull():
+            thumbnail.setText("Не удалось открыть картинку")
+            return
+        thumbnail.setPixmap(pixmap.scaled(240, 160, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        choose.setEnabled(True)
+
+    def thumbnail_error(self, error, thumbnail, generation):
+        if not self.closed and generation == self.image_generation:
+            thumbnail.setText("Изображение недоступно")
+            thumbnail.setToolTip(error)
+
+    def choose_picture(self, picture):
+        self.selected_picture = picture
+        self.update_selection()
+
+    def clear_picture(self):
+        self.selected_picture = None
+        self.update_selection()
+
+    def clear_sentence(self):
+        self.selected_sentence = None
+        self.update_selection()
+
+    def update_selection(self):
+        sentence = self.selected_sentence.japanese if self.selected_sentence else "не выбрано"
+        picture = self.selected_picture.title[:70] if self.selected_picture else "не выбрана"
+        self.selection_info.setText(f"Предложение: {sentence}\nКартинка: {picture}")
+
+    def finish_selection(self):
+        if self.closed or self.selection.expired or self.selection.done.is_set():
+            return
+        sentence, picture = self.selected_sentence, self.selected_picture
+        def prepare():
+            if sentence:
+                self.owner.audio.fetch(sentence)
+            if picture:
+                self.owner.images.fetch(picture)
+        self.setEnabled(False)
+        self.selection_info.setText("Подготовка выбранных файлов…")
+        self.owner.jobs.run(prepare, lambda _: self.commit_media(sentence, picture), self.choose_error)
+
+    def commit_media(self, sentence, picture):
+        if self.closed or self.selection.expired or self.selection.done.is_set():
+            return
+        self.selection.picture = picture
+        self.commit(sentence)
 
     def check_expired(self):
         if self.selection and self.selection.expired:
@@ -211,6 +358,10 @@ class Picker(QDialog):
             self.info.setText("Аудио недоступно: " + error)
 
     def choose(self, sentence):
+        if self.with_images:
+            self.selected_sentence = sentence
+            self.update_selection()
+            return
         if self.selection:
             if self.selection.expired or self.selection.done.is_set():
                 self.close()
@@ -231,6 +382,8 @@ class Picker(QDialog):
         if not self.closed:
             self.setEnabled(True)
             self.info.setText("Не удалось загрузить запись. Выберите другую: " + error)
+            if self.with_images:
+                self.selection_info.setText("Не удалось подготовить выбранные файлы: " + error)
 
     def commit(self, sentence):
         if self.closed or self.selection.expired or self.selection.done.is_set():
@@ -257,11 +410,13 @@ class MainWindow(QMainWindow):
         self.settings = Settings.load(self.config_path)
         self.corpus = Corpus(directory / "sentences.json")
         self.audio = AudioCache(directory / "audio")
+        self.images = ImageCache(directory / "images")
+        self.image_search = ImageSearch()
         self.jobs = Jobs(self)
         self.events = Events(self)
         self.events.selection.connect(self.open_selection)
         self.events.status.connect(self.set_status)
-        self.proxy = Proxy(self.settings, self.audio, self.events.selection.emit, self.events.status.emit)
+        self.proxy = Proxy(self.settings, self.audio, self.events.selection.emit, self.events.status.emit, images=self.images)
         self.pickers = []
         self.setWindowTitle("koeminer")
         self.setWindowIcon(app_icon())
@@ -365,7 +520,8 @@ class MainWindow(QMainWindow):
         form.addRow(button("Загрузить типы и поля из Anki", self.load_models))
         self.fields = {}
         for key, title in [("expression", "Поле слова / кандзи"), ("sentence", "Поле предложения"),
-                           ("audio", "Поле аудио предложения"), ("translation", "Поле перевода (необязательно)")]:
+                           ("audio", "Поле аудио предложения"), ("translation", "Поле перевода (необязательно)"),
+                           ("image", "Поле картинки (необязательно)")]:
             combo = QComboBox()
             combo.setEditable(True)
             self.fields[key] = combo

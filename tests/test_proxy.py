@@ -72,6 +72,29 @@ def test_cancel_never_creates_note(bridge):
     assert [x["action"] for x in calls] == ["version"]
 
 
+def test_image_upload_and_image_only_note(bridge, tmp_path):
+    from koeminer.images import Picture
+    proxy, calls = bridge
+    proxy.settings.profiles["Japanese"].image = "Picture"
+    path = tmp_path / "cat.jpg"
+    path.write_bytes(b"isolated image fixture")
+    class Images:
+        def fetch(self, picture):
+            return path
+    proxy.images = Images()
+    def select(pending):
+        pending.picture = Picture("cat", "https://upload.wikimedia.org/cat.jpg", "https://commons.wikimedia.org/wiki/File:Cat.jpg")
+        pending.cancelled = False
+        pending.done.set()
+    proxy.on_selection = select
+    payload = request()
+    payload["params"]["note"]["fields"]["Picture"] = ""
+    assert proxy.dispatch(payload)["result"] == 12345
+    assert [x["action"] for x in calls] == ["version", "storeMediaFile", "addNote"]
+    assert '<img src="saved.mp3">' in calls[-1]["params"]["note"]["fields"]["Picture"]
+    assert calls[-1]["params"]["note"]["fields"]["Sentence"] == ""
+
+
 def test_skip_preserves_note(bridge):
     proxy, calls = bridge
     def skip(pending):

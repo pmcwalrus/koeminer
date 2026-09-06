@@ -11,6 +11,33 @@ from koeminer.images import ImageCache, ImageSearch, Picture
 PICTURE = Picture("Cat", "https://upload.wikimedia.org/cat.jpg", "https://commons.wikimedia.org/wiki/File:Cat.jpg", "A & B", "CC BY 4.0")
 
 
+def test_yandex_search_parses_ranked_results_and_skips_duplicates(monkeypatch):
+    from html import escape
+    items = [{"image": f"//avatars.mds.yandex.net/i?id={i}&n=13", "origUrl": f"https://example.org/{i}",
+              "alt": "猫 & кот"} for i in range(12)]
+    items.insert(1, items[0])
+    items.insert(0, {"image": "https://127.0.0.1/private"})
+    state = {"initialState": {"serpList": {"items": {
+        "keys": list(map(str, range(len(items)))), "entities": {str(i): item for i, item in enumerate(items)}}}}}
+    page = '<div data-state="' + escape(json.dumps(state), quote=True) + '"></div>'
+    def get(url, **kwargs):
+        assert kwargs["params"]["text"] == "猫"
+        return httpx.Response(200, text=page, request=httpx.Request("GET", url))
+    monkeypatch.setattr(httpx, "get", get)
+    results = ImageSearch().search(" 猫 ", "Яндекс")
+    assert len(results) == 10
+    assert results[0].url == "https://avatars.mds.yandex.net/i?id=0&n=13"
+    assert results[0].title == "猫 & кот"
+    assert results[0].provider == "Яндекс"
+
+
+@pytest.mark.parametrize("page", ['<div>SmartCaptcha</div>', '<div>Unexpected page</div>'])
+def test_yandex_reports_unreadable_response(page):
+    from koeminer.images import parse_yandex
+    with pytest.raises(ValueError):
+        parse_yandex(page)
+
+
 def test_existing_settings_still_load(tmp_path):
     path = tmp_path / "settings.json"
     path.write_text(json.dumps({"profiles": {"Japanese": {"expression": "Expression", "sentence": "Sentence", "audio": "SentenceAudio"}}}))
@@ -34,33 +61,27 @@ def test_skip_picture_preserves_existing_image():
     assert enrich(note, Mapping(image="Picture"), None) == note
 
 
-def test_search_returns_five_ranked_results(monkeypatch):
+def test_search_returns_ten_ranked_results(monkeypatch):
     def get(url, **kwargs):
-        assert kwargs["params"]["gsrlimit"] == 5
+        assert kwargs["params"]["gsrlimit"] == 10
         pages = {str(i): {"title": f"File:cat{i}.jpg", "index": i,
                          "imageinfo": [{"thumburl": PICTURE.url, "descriptionurl": PICTURE.source_url}]}
                  for i in reversed(range(12))}
         return httpx.Response(200, json={"query": {"pages": pages}}, request=httpx.Request("GET", url))
     monkeypatch.setattr(httpx, "get", get)
     rows = ImageSearch().search("猫")
-    assert len(rows) == 5
+    assert len(rows) == 10
     assert rows[0].title == "cat0.jpg"
     assert ImageSearch().search(" ") == []
 
 
-def test_openverse_limits_to_five_and_excludes_wikimedia(monkeypatch):
-    import uuid
-    def get(url, **kwargs):
-        assert kwargs["params"]["page_size"] == 5
-        assert kwargs["params"]["excluded_source"] == "wikimedia"
-        rows = [{"id": str(uuid.uuid4()), "title": "cat", "source": "flickr"} for _ in range(7)]
-        rows.insert(0, {"source": "wikimedia"})
-        return httpx.Response(200, json={"results": rows}, request=httpx.Request("GET", url))
-    monkeypatch.setattr(httpx, "get", get)
-    rows = ImageSearch().search("cat", "Openverse")
-    assert len(rows) == 5
-    assert all(row.provider == "Openverse" for row in rows)
-    assert all(row.url.startswith("https://api.openverse.org/v1/images/") for row in rows)
+def test_removed_provider_key_is_discarded(tmp_path):
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps({"serpapi_key": "obsolete-key", "profiles": {}}))
+    settings = Settings.load(path)
+    settings.save(path)
+    assert "serpapi_key" not in json.loads(path.read_text())
+    assert ImageSearch.sources == ("Wikimedia Commons", "Яндекс")
 
 
 def test_cache_decodes_image_and_reuses_file(tmp_path, monkeypatch):

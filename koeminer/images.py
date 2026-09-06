@@ -1,7 +1,8 @@
-"""Wikimedia Commons search and local image cache."""
+"""Wikimedia and Yandex image search with a local image cache."""
 import hashlib
+import json
 import threading
-import uuid
+from html.parser import HTMLParser
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
@@ -12,7 +13,7 @@ from PySide6.QtGui import QImageReader
 
 from .core import plain
 
-HEADERS = {"User-Agent": "koeminer/0.2.0 (https://github.com/pmcwalrus/koeminer)"}
+HEADERS = {"User-Agent": "koeminer/0.3.0 (https://github.com/pmcwalrus/koeminer)"}
 
 
 @dataclass(frozen=True)
@@ -27,31 +28,75 @@ class Picture:
 
 def trusted_url(url, media=True):
     parsed = urlparse(url)
-    hosts = {"upload.wikimedia.org", "thumb.wikimedia.org", "api.openverse.org"} if media else {"commons.wikimedia.org", "openverse.org"}
-    if parsed.scheme != "https" or parsed.hostname not in hosts or parsed.username or parsed.port not in (None, 443):
+    hosts = {"upload.wikimedia.org", "thumb.wikimedia.org", "avatars.mds.yandex.net"} if media else {"commons.wikimedia.org"}
+    allowed = parsed.hostname in hosts
+    if parsed.scheme != "https" or not allowed or parsed.username or parsed.port not in (None, 443):
         raise ValueError("Недопустимый адрес изображения.")
-    if media and parsed.hostname == "api.openverse.org":
-        parts = parsed.path.strip("/").split("/")
-        if len(parts) != 4 or parts[:2] != ["v1", "images"] or parts[3] != "thumb":
-            raise ValueError("Недопустимый адрес миниатюры Openverse.")
-        uuid.UUID(parts[2])
     return url
 
 
-class ImageSearch:
-    sources = ("Wikimedia Commons", "Openverse")
+class YandexPage(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.items = None
 
-    def search(self, query: str, source="Wikimedia Commons") -> list[Picture]:
+    def handle_starttag(self, tag, attrs):
+        state = dict(attrs).get("data-state")
+        if not state:
+            return
+        try:
+            items = json.loads(state)["initialState"]["serpList"]["items"]
+            self.items = [items["entities"][key] for key in items["keys"]]
+        except (ValueError, KeyError, TypeError):
+            return
+
+
+def parse_yandex(page, offset=0):
+    parser = YandexPage()
+    parser.feed(page)
+    if parser.items is None:
+        if any(marker in page.lower() for marker in ("showcaptcha", "checkboxcaptcha", "smartcaptcha", "подтвердите, что")):
+            raise ValueError("Яндекс запросил капчу. Попробуйте позже или выберите Wikimedia.")
+        raise ValueError("Не удалось прочитать выдачу Яндекса. Попробуйте позже или измените запрос.")
+    results, seen = [], set()
+    for item in parser.items:
+        url = item.get("image", "")
+        if url.startswith("//"):
+            url = "https:" + url
+        try:
+            trusted_url(url)
+        except ValueError:
+            continue
+        identity = item.get("origUrl") or url
+        if identity in seen:
+            continue
+        seen.add(identity)
+        results.append(Picture(plain(item.get("alt") or "Картинка"), url,
+                               "https://yandex.ru/images/", provider="Яндекс"))
+        if len(results) == offset + 10:
+            break
+    return results[offset:offset + 10]
+
+
+class ImageSearch:
+    sources = ("Wikimedia Commons", "Яндекс")
+
+    def search(self, query: str, source="Wikimedia Commons", page=0) -> list[Picture]:
         if not query.strip():
             return []
-        if source == "Openverse":
-            return self.search_openverse(query)
+        if source == "Яндекс":
+            response = httpx.get("https://yandex.ru/images/search", params={"text": query.strip(), "p": page // 3},
+                                 headers=HEADERS, timeout=30)
+            if response.status_code in (403, 429) or response.is_redirect:
+                raise ValueError("Яндекс ограничил запросы или требует капчу. Попробуйте позже или выберите Wikimedia.")
+            response.raise_for_status()
+            return parse_yandex(response.text, (page % 3) * 10)
         if source != "Wikimedia Commons":
             raise ValueError("Неизвестный источник картинок.")
         response = httpx.get("https://commons.wikimedia.org/w/api.php", params={
             "action": "query", "format": "json", "generator": "search",
             "gsrsearch": query.strip() + " filetype:bitmap", "gsrnamespace": 6,
-            "gsrlimit": 5, "prop": "imageinfo", "iiprop": "url|extmetadata",
+            "gsrlimit": 10, "gsroffset": page * 10, "prop": "imageinfo", "iiprop": "url|extmetadata",
             "iiurlwidth": 960, "iiextmetadatafilter": "Artist|LicenseShortName",
         }, headers=HEADERS, timeout=30)
         response.raise_for_status()
@@ -70,24 +115,8 @@ class ImageSearch:
                                    trusted_url(info["descriptionurl"], False),
                                    plain(metadata.get("Artist", {}).get("value", "")),
                                    plain(metadata.get("LicenseShortName", {}).get("value", ""))))
-        return results[:5]
+        return results[:10]
 
-    def search_openverse(self, query):
-        response = httpx.get("https://api.openverse.org/v1/images/", params={
-            "q": query.strip(), "page_size": 5, "excluded_source": "wikimedia",
-        }, headers=HEADERS, timeout=15)
-        response.raise_for_status()
-        results = []
-        for item in response.json().get("results", []):
-            if item.get("source") == "wikimedia":
-                continue
-            identifier = str(uuid.UUID(item["id"]))
-            results.append(Picture(plain(item.get("title") or "Изображение"),
-                                   f"https://api.openverse.org/v1/images/{identifier}/thumb/",
-                                   f"https://openverse.org/image/{identifier}",
-                                   plain(item.get("creator") or ""),
-                                   str(item.get("license") or ""), "Openverse"))
-        return results[:5]
 
 
 class ImageCache:

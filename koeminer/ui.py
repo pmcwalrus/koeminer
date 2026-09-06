@@ -142,7 +142,10 @@ class Picker(QDialog):
         if self.with_images:
             self.tabs = QTabWidget()
             self.tabs.addTab(scroll, "Предложения")
-            self.tabs.addTab(self.image_tab(query), "Картинки")
+            fields = selection.note.get("fields", {}) if selection else {}
+            selection_field = selection.mapping.image_query if selection else "popup_selection_text"
+            image_query = plain(fields.get(selection_field) or "") or query
+            self.tabs.addTab(self.image_tab(image_query), "Картинки")
             self.tabs.currentChanged.connect(self.tab_changed)
             layout.addWidget(self.tabs, 1)
         else:
@@ -183,27 +186,22 @@ class Picker(QDialog):
         box = QVBoxLayout(widget)
         row = QHBoxLayout()
         self.image_query = QLineEdit(query)
-        self.image_query.setPlaceholderText("Запрос для 10 картинок — можно на английском")
+        self.image_query.setPlaceholderText("Запрос для картинок — можно на английском")
         self.image_query.returnPressed.connect(self.search_images)
         row.addWidget(self.image_query)
-        row.addWidget(button("Найти 10 картинок", self.search_images, True))
+        row.addWidget(button("Найти картинки", self.search_images, True))
         box.addLayout(row)
-        self.image_info = label("По 5 картинок из Wikimedia Commons и Openverse", "muted")
+        self.image_info = label("По 10 картинок из Wikimedia Commons и Яндекса", "muted")
         box.addWidget(self.image_info)
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        container = QWidget()
-        self.image_results = QGridLayout(container)
-        self.image_results.setAlignment(Qt.AlignmentFlag.AlignTop)
-        scroll.setWidget(container)
-        box.addWidget(scroll)
+        self.image_results = QHBoxLayout()
+        box.addLayout(self.image_results, 1)
         return widget
 
     def tab_changed(self, index):
         for i in range(self.sentence_search_row.count()):
             self.sentence_search_row.itemAt(i).widget().setVisible(index == 0)
         self.info.setVisible(index == 0)
-        self.source_label.setText("Wikimedia Commons / Openverse" if index == 1 else "Источник: sentencesearch.neocities.org")
+        self.source_label.setText("Wikimedia Commons · Яндекс" if index == 1 else "Источник: sentencesearch.neocities.org")
         if index == 1 and self.image_generation == 0:
             self.preload_images()
 
@@ -211,34 +209,75 @@ class Picker(QDialog):
         self.image_generation += 1
         generation = self.image_generation
         query = self.image_query.text().strip()
-        self.image_info.setText("По 5 картинок из каждого источника. Результаты появляются независимо.")
+        self.image_info.setText("Поиск по 10 картинок из каждого источника. Изображения появляются по мере загрузки.")
         while self.image_results.count():
             item = self.image_results.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
         self.source_status = {}
-        for index, source in enumerate(self.owner.image_search.sources):
+        self.image_sources = {}
+        self.active_image_query = query
+        for source in self.owner.image_search.sources:
+            column = QWidget()
+            layout = QVBoxLayout(column)
+            layout.setContentsMargins(0, 0, 0, 0)
             status = label(source + ": поиск…")
+            heading_font = status.font()
+            heading_font.setBold(True)
+            status.setFont(heading_font)
             self.source_status[source] = status
-            self.image_results.addWidget(status, index * 3, 0, 1, 3)
-            self.owner.jobs.run(lambda s=source: self.owner.image_search.search(query, s),
-                                lambda rows, s=source: self.show_images(rows, generation, s),
-                                lambda error, s=source: self.image_search_error(error, generation, s))
+            layout.addWidget(status)
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            content = QWidget()
+            results = QVBoxLayout(content)
+            results.setAlignment(Qt.AlignmentFlag.AlignTop)
+            more = button("Загрузить ещё", lambda _, s=source: self.load_more_images(s))
+            results.addWidget(more)
+            scroll.setWidget(content)
+            layout.addWidget(scroll)
+            self.image_results.addWidget(column, 1)
+            self.image_sources[source] = {"layout": results, "button": more, "scroll": scroll,
+                                          "page": 0, "seen": set(), "loading": False}
+            self.load_more_images(source)
+
+    def load_more_images(self, source):
+        state = self.image_sources[source]
+        if self.closed or state["loading"]:
+            return
+        state["loading"] = True
+        state["button"].setEnabled(False)
+        state["button"].setText("Загрузка…")
+        generation = self.image_generation
+        query, page = self.active_image_query, state["page"]
+        self.owner.jobs.run(lambda: self.owner.image_search.search(query, source, page),
+                            lambda rows: self.show_images(rows, generation, source),
+                            lambda error: self.image_search_error(error, generation, source))
 
     def image_search_error(self, error, generation, source):
         if not self.closed and generation == self.image_generation:
-            self.source_status[source].setText(source + ": источник недоступен. Нажмите поиск для повтора.")
+            self.source_status[source].setText(source + ": " + error)
             self.source_status[source].setToolTip(error)
+            state = self.image_sources[source]
+            state["loading"] = False
+            state["button"].setText("Повторить загрузку")
+            state["button"].setEnabled(True)
 
     def show_images(self, rows, generation, source):
         if self.closed or generation != self.image_generation:
             return
-        rows = rows[:5]
-        self.source_status[source].setText(f"{source}: {len(rows)} из 5" if rows else source + ": ничего не найдено. Измените запрос.")
-        offset = self.owner.image_search.sources.index(source) * 3 + 1
-        for index, picture in enumerate(rows):
+        state = self.image_sources[source]
+        state["loading"] = False
+        state["page"] += 1
+        added = 0
+        for picture in rows[:10]:
+            if picture.url in state["seen"]:
+                continue
+            state["seen"].add(picture.url)
+            added += 1
             frame = QFrame()
             frame.setFrameShape(QFrame.Shape.StyledPanel)
+            frame.setMinimumHeight(280)
             box = QVBoxLayout(frame)
             thumbnail = label("Загрузка…")
             thumbnail.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -252,10 +291,15 @@ class Picker(QDialog):
             choose = button("Выбрать картинку", lambda _, p=picture: self.choose_picture(p), True)
             choose.setEnabled(False)
             box.addWidget(choose)
-            self.image_results.addWidget(frame, offset + index // 3, index % 3)
+            state["layout"].insertWidget(state["layout"].count() - 1, frame)
             self.owner.jobs.run(lambda p=picture: self.owner.images.fetch(p),
                                 lambda path, t=thumbnail, b=choose: self.image_ready(path, t, b, generation),
                                 lambda error, t=thumbnail: self.thumbnail_error(error, t, generation))
+        total = len(state["seen"])
+        self.source_status[source].setText(f"{source}: {total} картинок" if total else source + ": ничего не найдено. Измените запрос.")
+        more = len(rows) == 10 and added > 0
+        state["button"].setText("Загрузить ещё" if more else "Больше картинок нет")
+        state["button"].setEnabled(more)
 
     def image_ready(self, path, thumbnail, choose, generation):
         if self.closed or generation != self.image_generation:
@@ -543,7 +587,7 @@ class MainWindow(QMainWindow):
         self.key.setEchoMode(QLineEdit.EchoMode.Password)
         form.addRow("Адрес AnkiConnect", self.upstream)
         form.addRow("Порт koeminer", self.port)
-        form.addRow("API-ключ (если задан)", self.key)
+        form.addRow("API-ключ AnkiConnect (если задан)", self.key)
         self.models = QComboBox()
         self.models.setEditable(True)
         self.models.addItems(list(self.settings.profiles))
@@ -553,12 +597,16 @@ class MainWindow(QMainWindow):
         self.fields = {}
         for key, title in [("expression", "Поле слова / кандзи"), ("sentence", "Поле предложения"),
                            ("audio", "Поле аудио предложения"), ("translation", "Поле перевода (необязательно)"),
-                           ("image", "Поле картинки (необязательно)")]:
+                           ("image", "Поле картинки (необязательно)"),
+                           ("image_query", "Поле выделенного текста для картинок")]:
             combo = QComboBox()
             combo.setEditable(True)
             self.fields[key] = combo
             form.addRow(title, combo)
         self.append = QCheckBox("Добавлять к содержимому полей вместо замены")
+        form.addRow(label("В Yomitan назначьте этому полю маркер {popup-selection-text}. "
+                          "Выделяйте текст внутри окна Yomitan перед нажатием +. "
+                          "Если поле пустое или отсутствует, картинки ищутся по слову.", "muted"))
         form.addRow(self.append)
         form.addRow(label("Имена полей должны точно совпадать с Anki. В шаблоне карточки должны отображаться поля предложения и аудио.", "muted"))
         form.addRow(button("Сохранить настройки", self.save_settings, True))

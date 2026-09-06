@@ -21,7 +21,7 @@ def test_http_opens_picker_and_selection_returns_note_id(tmp_path, order):
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
-    Settings(port=port, profiles={"Japanese": Mapping(image="Picture" if with_image else "")}).save(tmp_path / "settings.json")
+    Settings(port=port, profiles={"Japanese": Mapping(image="Picture" if with_image else "", image_query="SelectedMeaning")}).save(tmp_path / "settings.json")
     window = MainWindow(tmp_path)
     sentence = Sentence("猫です", "A cat", "fixture", "cat.mp3")
     window.corpus.rows = [sentence]
@@ -43,7 +43,7 @@ def test_http_opens_picker_and_selection_returns_note_id(tmp_path, order):
         try:
             result["response"] = httpx.post(f"http://127.0.0.1:{port}", timeout=15, trust_env=False, json={
                 "action": "addNote", "version": 2, "params": {"note": {
-                    "modelName": "Japanese", "fields": {"Expression": "猫", "Sentence": "", "SentenceAudio": "", "Picture": ""}}}}).json()
+                    "modelName": "Japanese", "fields": {"Expression": "猫", "Sentence": "", "SentenceAudio": "", "Picture": "", "SelectedMeaning": "<b>sleeping cat</b>"}}}}).json()
         except Exception as exc:
             result["error"] = str(exc)
 
@@ -58,6 +58,8 @@ def test_http_opens_picker_and_selection_returns_note_id(tmp_path, order):
                 chosen = True
                 picker = window.pickers[0]
                 if with_image:
+                    assert picker.image_query.text() == "sleeping cat"
+                    assert picker.query.text() == "猫"
                     from koeminer.images import Picture
                     picture = Picture("cat", "https://upload.wikimedia.org/cat.jpg", "https://commons.wikimedia.org/wiki/File:Cat.jpg")
                     if order == "audio_first":
@@ -130,13 +132,14 @@ def test_images_load_while_sentence_tab_is_open(tmp_path, monkeypatch):
     app = QApplication.instance() or QApplication([])
     window = MainWindow(tmp_path)
     window.corpus.rows = [Sentence("猫", "cat", "fixture", "cat.mp3")]
+    window.image_search.sources = ("Wikimedia Commons", "Test source")
     requests = []
     loaded = threading.Event()
     release_slow_source = threading.Event()
     picture = Picture("cat", "https://upload.wikimedia.org/cat.jpg", "https://commons.wikimedia.org/wiki/File:Cat.jpg")
-    def search(query, source):
+    def search(query, source, page=0):
         requests.append(query)
-        if source == "Openverse":
+        if source == "Test source":
             release_slow_source.wait(5)
             raise ValueError("source unavailable")
         return [picture]
@@ -154,20 +157,78 @@ def test_images_load_while_sentence_tab_is_open(tmp_path, monkeypatch):
             time.sleep(0.01)
         assert loaded.is_set()
         assert picker.tabs.currentIndex() == 0
-        assert "1 из 5" in picker.source_status["Wikimedia Commons"].text()
-        assert "поиск" in picker.source_status["Openverse"].text()
+        assert "1 картинок" in picker.source_status["Wikimedia Commons"].text()
+        assert "поиск" in picker.source_status["Test source"].text()
         picker.tabs.setCurrentIndex(1)
         app.processEvents()
         assert len(requests) == 2
         release_slow_source.set()
         deadline = time.monotonic() + 5
-        while "недоступен" not in picker.source_status["Openverse"].text() and time.monotonic() < deadline:
+        while "source unavailable" not in picker.source_status["Test source"].text() and time.monotonic() < deadline:
             app.processEvents()
             time.sleep(0.01)
-        assert "недоступен" in picker.source_status["Openverse"].text()
-        assert "1 из 5" in picker.source_status["Wikimedia Commons"].text()
+        assert "source unavailable" in picker.source_status["Test source"].text()
+        assert "1 картинок" in picker.source_status["Wikimedia Commons"].text()
     finally:
         release_slow_source.set()
+        window.shutdown()
+        window.tray.hide()
+        window.deleteLater()
+        app.processEvents()
+
+
+def test_image_columns_pagination_retry_and_query_reset(tmp_path, monkeypatch):
+    from koeminer.proxy import Proxy
+    from koeminer.images import Picture
+    monkeypatch.setattr(Proxy, "start", lambda _: None)
+    monkeypatch.setattr(Proxy, "stop", lambda _: None)
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(tmp_path)
+    window.corpus.rows = [Sentence("猫", "cat", "fixture", "cat.mp3")]
+    calls = []
+    fail = [True]
+    def search(query, source, page):
+        calls.append((query, source, page))
+        if page == 1 and fail[0]:
+            fail[0] = False
+            raise ValueError("temporary failure")
+        return [Picture(str(i), f"https://upload.wikimedia.org/{query}-{i}.jpg", "")
+                for i in range(page * 10, min(page * 10 + 10, 13))]
+    window.image_search.search = search
+    window.images.fetch = lambda _: tmp_path / "missing.jpg"
+    def until(predicate):
+        deadline = time.monotonic() + 5
+        while not predicate() and time.monotonic() < deadline:
+            app.processEvents()
+            time.sleep(0.01)
+        assert predicate()
+    window.preview()
+    picker = window.pickers[0]
+    try:
+        until(lambda: hasattr(picker, "image_sources") and all(not s["loading"] for s in picker.image_sources.values()))
+        picker.tabs.setCurrentIndex(1)
+        app.processEvents()
+        left, right = [picker.image_results.itemAt(i).widget() for i in range(2)]
+        assert left.y() == right.y() and left.x() < right.x()
+        source = window.image_search.sources[0]
+        state = picker.image_sources[source]
+        assert len(state["seen"]) == 10
+        assert state["scroll"] is not picker.image_sources[window.image_search.sources[1]]["scroll"]
+        state["button"].click()
+        until(lambda: not state["loading"])
+        assert state["page"] == 1 and state["button"].isEnabled()
+        state["button"].click()
+        until(lambda: not state["loading"])
+        assert len(state["seen"]) == 13
+        assert not state["button"].isEnabled()
+        assert state["layout"].itemAt(13).widget() is state["button"]
+        assert calls[-2:] == [(picker.active_image_query, source, 1)] * 2
+        picker.image_query.setText("dog")
+        picker.search_images()
+        until(lambda: all(not s["loading"] for s in picker.image_sources.values()))
+        assert all(s["page"] == 1 and len(s["seen"]) == 10 for s in picker.image_sources.values())
+        assert all(q == "dog" and page == 0 for q, _, page in calls[-2:])
+    finally:
         window.shutdown()
         window.tray.hide()
         window.deleteLater()

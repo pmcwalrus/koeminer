@@ -25,6 +25,7 @@ class Mapping:
     translation: str = ""
     append: bool = False
     image: str = ""
+    image_query: str = "popup_selection_text"
 
     def validate(self):
         targets = [self.sentence, self.audio] + ([self.translation] if self.translation else [])
@@ -57,6 +58,7 @@ class Settings:
         if not path.exists():
             return cls()
         data = json.loads(path.read_text(encoding="utf-8"))
+        data.pop("serpapi_key", None)  # Discard the removed provider key on migration.
         data["profiles"] = {k: Mapping(**v) for k, v in data.get("profiles", {}).items()}
         settings = cls(**data)
         settings.validate()

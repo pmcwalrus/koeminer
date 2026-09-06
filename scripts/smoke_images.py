@@ -1,4 +1,4 @@
-"""Manual network smoke test: real search, ten thumbnails, screenshot."""
+"""Manual network smoke test: ten thumbnails from each source."""
 import sys
 from pathlib import Path
 
@@ -20,9 +20,10 @@ picker.tabs.setCurrentIndex(1)
 
 def check():
     loaded = sum(1 for image in picker.findChildren(QLabel) if image.pixmap() and not image.pixmap().isNull())
-    if loaded == 10:
+    expected = 20
+    if loaded == expected:
         picker.grab().save(".dev/images-picker.png")
-        print("10 image results and 10 decoded thumbnails displayed", flush=True)
+        print(f"{loaded} decoded thumbnails displayed", flush=True)
         window.shutdown()
         app.exit(0)
 

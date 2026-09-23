@@ -14,7 +14,7 @@ def report(path: Path):
             failure = case.find("error")
         if failure is None:
             continue
-        text = (failure.text or failure.get("message") or "Test failed")[:3000]
+        text = (failure.text or failure.get("message") or "Test failed")[-3000:]
         text = text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
         name = case.get("name", "test").replace("%", "%25").replace("\r", "").replace("\n", "")
         filename = case.get("file", "tests").replace("%", "%25").replace("\r", "").replace("\n", "")

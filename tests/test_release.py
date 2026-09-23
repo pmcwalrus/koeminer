@@ -10,24 +10,33 @@ from PySide6.QtWidgets import QApplication
 
 from koeminer import __version__
 from koeminer.proxy import Proxy
-from koeminer.ui import MainWindow, RELEASE_API_URL, RELEASE_URL, latest_release_version
+from koeminer.ui import MainWindow, RELEASE_URL, latest_release_version
 
 
-def test_latest_release_version_uses_github_api(monkeypatch):
+def test_latest_release_version_uses_public_redirect(monkeypatch):
     def get(url, **kwargs):
-        assert url == RELEASE_API_URL
-        assert kwargs["timeout"] == 5
-        return httpx.Response(200, json={"tag_name": "v1.2.3"}, request=httpx.Request("GET", url))
+        assert url == RELEASE_URL
+        assert kwargs["timeout"] == 10
+        assert kwargs["follow_redirects"] is False
+        return httpx.Response(302, headers={"location": "https://github.com/pmcwalrus/koeminer/releases/tag/v1.2.3"},
+                              request=httpx.Request("GET", url))
 
     monkeypatch.setattr(httpx, "get", get)
     assert latest_release_version() == "v1.2.3"
 
 
-@pytest.mark.parametrize("payload", [{}, {"tag_name": ""}, {"tag_name": 12}])
-def test_latest_release_version_rejects_missing_tag(monkeypatch, payload):
+@pytest.mark.parametrize("location", ["", "https://evil.example/releases/tag/v1", "/pmcwalrus/koeminer/releases/tag/"])
+def test_latest_release_version_rejects_invalid_redirect(monkeypatch, location):
     monkeypatch.setattr(httpx, "get", lambda url, **_: httpx.Response(
-        200, json=payload, request=httpx.Request("GET", url)))
+        302, headers={"location": location}, request=httpx.Request("GET", url)))
     with pytest.raises(ValueError, match="версию релиза"):
+        latest_release_version()
+
+
+def test_latest_release_version_reports_http_errors(monkeypatch):
+    monkeypatch.setattr(httpx, "get", lambda url, **_: httpx.Response(
+        503, request=httpx.Request("GET", url)))
+    with pytest.raises(httpx.HTTPStatusError, match="503"):
         latest_release_version()
 
 
@@ -50,6 +59,7 @@ def test_version_and_download_link_remain_visible_when_github_fails(tmp_path, mo
             app.processEvents()
             time.sleep(0.01)
         assert window.version_info.text() == f"Текущая: v{__version__} · Последняя: недоступна"
+        assert "offline" in window.version_info.toolTip()
         assert RELEASE_URL in window.release_link.text()
     finally:
         window.shutdown()

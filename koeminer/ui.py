@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import threading
 from pathlib import Path
+from urllib.parse import unquote, urljoin, urlparse
 
 import httpx
 from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
@@ -22,16 +23,22 @@ from . import __version__
 
 STYLE = ""  # Use the operating system palette and standard Qt controls.
 RELEASE_URL = "https://github.com/pmcwalrus/koeminer/releases/latest"
-RELEASE_API_URL = "https://api.github.com/repos/pmcwalrus/koeminer/releases/latest"
+RELEASE_TAG_PATH = "/pmcwalrus/koeminer/releases/tag/"
 
 
 def latest_release_version():
-    response = httpx.get(RELEASE_API_URL, timeout=5, follow_redirects=True)
-    response.raise_for_status()
-    tag = response.json().get("tag_name")
-    if not isinstance(tag, str) or not tag.strip() or len(tag) > 64:
+    # The public release redirect does not share the unauthenticated API's 60 requests/hour/IP limit.
+    response = httpx.get(RELEASE_URL, timeout=10, follow_redirects=False)
+    if response.status_code not in (301, 302, 303, 307, 308):
+        response.raise_for_status()
+        raise ValueError("GitHub не перенаправил на последний релиз.")
+    location = urlparse(urljoin(RELEASE_URL, response.headers.get("location", "")))
+    tag = unquote(location.path.removeprefix(RELEASE_TAG_PATH))
+    if (location.scheme != "https" or location.netloc != "github.com"
+            or not location.path.startswith(RELEASE_TAG_PATH)
+            or not tag or len(tag) > 64 or "/" in tag or "\\" in tag):
         raise ValueError("GitHub не вернул версию релиза.")
-    return tag.strip()
+    return tag
 
 
 def label(text, name=None):
@@ -574,8 +581,11 @@ class MainWindow(QMainWindow):
         self.status.setText(text)
 
     def check_latest_release(self):
-        self.jobs.run(latest_release_version, self.show_latest_release,
-                      lambda _: self.version_info.setText(f"Текущая: v{__version__} · Последняя: недоступна"))
+        self.jobs.run(latest_release_version, self.show_latest_release, self.release_check_failed)
+
+    def release_check_failed(self, error):
+        self.version_info.setText(f"Текущая: v{__version__} · Последняя: недоступна")
+        self.version_info.setToolTip(f"Не удалось проверить релиз GitHub: {error}")
 
     def show_latest_release(self, version):
         self.version_info.setToolTip(f"Текущая: v{__version__} · Последняя: {version}")
@@ -606,9 +616,10 @@ class MainWindow(QMainWindow):
     def settings_widget(self):
         widget = QWidget()
         form = QFormLayout(widget)
+        self.settings_form = form
         form.setVerticalSpacing(8)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         self.upstream = QLineEdit(self.settings.upstream)
         self.port = QSpinBox()
         self.port.setRange(1024, 65535)
@@ -741,6 +752,14 @@ class MainWindow(QMainWindow):
         self.set_status("Проверка AnkiConnect…")
         self.jobs.run(lambda: self.proxy.call("version"),
                       lambda version: self.set_status(f"AnkiConnect подключён · API {version}"), self.set_status)
+
+    def resizeEvent(self, event):
+        if hasattr(self, "settings_form"):
+            policy = (QFormLayout.RowWrapPolicy.WrapAllRows if event.size().width() < 700
+                      else QFormLayout.RowWrapPolicy.WrapLongRows)
+            if self.settings_form.rowWrapPolicy() != policy:
+                self.settings_form.setRowWrapPolicy(policy)
+        super().resizeEvent(event)
 
     def closeEvent(self, event):
         if self.tray.isVisible():

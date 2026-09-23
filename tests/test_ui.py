@@ -8,7 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import httpx
 import pytest
-from PySide6.QtWidgets import QApplication, QTabWidget
+from PySide6.QtWidgets import QApplication, QFormLayout, QTabWidget
 
 from koeminer.core import Mapping, Sentence, Settings
 from koeminer.ui import MainWindow
@@ -16,7 +16,7 @@ from koeminer.ui import MainWindow
 
 @pytest.fixture(autouse=True)
 def stub_github_release(monkeypatch):
-    monkeypatch.setattr("koeminer.ui.latest_release_version", lambda: "v0.4.1")
+    monkeypatch.setattr("koeminer.ui.latest_release_version", lambda: "v0.4.2")
 
 
 @pytest.mark.parametrize("order", ["audio_only", "audio_first", "image_first"])
@@ -147,6 +147,7 @@ def test_small_windows_scroll_and_can_grow(tmp_path, monkeypatch, narrow_width):
         assert window.width() == picker.width() == narrow_width
         assert window.height() == picker.height() == 320
         assert window.content_scroll.horizontalScrollBar().maximum() == 0
+        assert window.settings_form.rowWrapPolicy() == QFormLayout.RowWrapPolicy.WrapAllRows
         assert picker.content_scroll.horizontalScrollBar().maximum() > 0
         assert window.content_scroll.verticalScrollBar().maximum() > 0
         assert picker.content_scroll.verticalScrollBar().maximum() > 0
@@ -161,6 +162,10 @@ def test_small_windows_scroll_and_can_grow(tmp_path, monkeypatch, narrow_width):
         for widget in (window, picker):
             assert widget.width() == 1200
             assert widget.content_scroll.horizontalScrollBar().maximum() == 0
+        assert window.settings_form.rowWrapPolicy() == QFormLayout.RowWrapPolicy.WrapLongRows
+        for control in controls:
+            caption = window.settings_form.labelForField(control)
+            assert caption.geometry().right() < control.geometry().left()
         assert all(control.width() > width for control, width in zip(controls, narrow))
     finally:
         window.shutdown()

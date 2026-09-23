@@ -2,6 +2,7 @@
 .dev/
 __pycache__/
 .pytest_cache/
+pytest-results.xml
 build/
 dist/
 *.spec

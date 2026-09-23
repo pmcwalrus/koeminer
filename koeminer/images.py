@@ -11,9 +11,10 @@ import httpx
 from PySide6.QtCore import QBuffer, QIODevice, QSize, Qt
 from PySide6.QtGui import QImageReader
 
+from . import __version__
 from .core import plain
 
-HEADERS = {"User-Agent": "koeminer/0.3.0 (https://github.com/pmcwalrus/koeminer)"}
+HEADERS = {"User-Agent": f"koeminer/{__version__} (https://github.com/pmcwalrus/koeminer)"}
 
 
 @dataclass(frozen=True)

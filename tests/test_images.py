@@ -42,6 +42,7 @@ def test_existing_settings_still_load(tmp_path):
     path = tmp_path / "settings.json"
     path.write_text(json.dumps({"profiles": {"Japanese": {"expression": "Expression", "sentence": "Sentence", "audio": "SentenceAudio"}}}))
     assert Settings.load(path).profiles["Japanese"].image == ""
+    assert Settings.load(path).profiles["Japanese"].tags == ""
     with pytest.raises(ValueError):
         Mapping(image="Expression").validate()
 

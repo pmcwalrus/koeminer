@@ -26,6 +26,7 @@ class Mapping:
     append: bool = False
     image: str = ""
     image_query: str = "popup_selection_text"
+    tags: str = ""
 
     def validate(self):
         targets = [self.sentence, self.audio] + ([self.translation] if self.translation else [])
@@ -160,6 +161,12 @@ class AudioCache:
 def enrich(note: dict, mapping: Mapping, sentence: Sentence | None, filename: str = "", picture=None, image_filename=""):
     mapping.validate()
     result = copy.deepcopy(note)
+    extra_tags = [tag.strip() for tag in mapping.tags.split(",") if tag.strip()]
+    if extra_tags:
+        tags = result.setdefault("tags", [])
+        for tag in extra_tags:
+            if tag not in tags:
+                tags.append(tag)
     fields = result["fields"]
     updates = {mapping.sentence: html.escape(sentence.japanese), mapping.audio: f"[sound:{filename}]"} if sentence else {}
     if sentence and mapping.translation:

@@ -19,6 +19,24 @@ def test_enrichment_preserves_yomitan_and_does_not_mutate():
     assert result["tags"] == ["yomitan"]
 
 
+@pytest.mark.parametrize("original_tags, expected", [
+    (["yomitan", "existing", "yomitan"], ["yomitan", "existing", "yomitan", "new", "日本語"]),
+    ([], ["new", "yomitan", "日本語"]),
+])
+def test_extra_tags_are_added_without_overwriting_yomitan(original_tags, expected):
+    note = {"fields": {"Sentence": "old"}, "tags": original_tags}
+    result = enrich(note, Mapping(tags=" new, yomitan, , new , 日本語 "), None)
+    assert result["tags"] == expected
+    assert result["fields"] == note["fields"]
+    assert note["tags"] == original_tags
+
+
+def test_extra_tags_are_added_when_yomitan_provides_none():
+    result = enrich({"fields": {}}, Mapping(tags=" one, two "), None)
+    assert result["tags"] == ["one", "two"]
+    assert "tags" not in enrich({"fields": {}}, Mapping(tags=" , "), None)
+
+
 def test_append():
     result = enrich({"fields": {"Sentence": "old", "SentenceAudio": "[sound:old.mp3]"}},
                     Mapping(append=True), Sentence("猫", "", "", "a.mp3"), "new.mp3")
@@ -37,7 +55,7 @@ def test_mapping_rejects_overwriting_word():
 
 def test_profiles_roundtrip_and_loop_prevention(tmp_path):
     path = tmp_path / "settings.json"
-    settings = Settings(profiles={"日本語": Mapping()})
+    settings = Settings(profiles={"日本語": Mapping(tags=" yomitan, new ")})
     settings.save(path)
     assert Settings.load(path) == settings
     settings.port = 8765

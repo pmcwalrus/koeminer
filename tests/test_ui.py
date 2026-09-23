@@ -8,10 +8,15 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import httpx
 import pytest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QTabWidget
 
 from koeminer.core import Mapping, Sentence, Settings
 from koeminer.ui import MainWindow
+
+
+@pytest.fixture(autouse=True)
+def stub_github_release(monkeypatch):
+    monkeypatch.setattr("koeminer.ui.latest_release_version", lambda: "v0.4.0")
 
 
 @pytest.mark.parametrize("order", ["audio_only", "audio_first", "image_first"])
@@ -21,7 +26,8 @@ def test_http_opens_picker_and_selection_returns_note_id(tmp_path, order):
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
-    Settings(port=port, profiles={"Japanese": Mapping(image="Picture" if with_image else "", image_query="SelectedMeaning")}).save(tmp_path / "settings.json")
+    Settings(port=port, profiles={"Japanese": Mapping(image="Picture" if with_image else "", image_query="SelectedMeaning",
+                                                   tags="added, yomitan")}).save(tmp_path / "settings.json")
     window = MainWindow(tmp_path)
     sentence = Sentence("猫です", "A cat", "fixture", "cat.mp3")
     window.corpus.rows = [sentence]
@@ -43,7 +49,8 @@ def test_http_opens_picker_and_selection_returns_note_id(tmp_path, order):
         try:
             result["response"] = httpx.post(f"http://127.0.0.1:{port}", timeout=15, trust_env=False, json={
                 "action": "addNote", "version": 2, "params": {"note": {
-                    "modelName": "Japanese", "fields": {"Expression": "猫", "Sentence": "", "SentenceAudio": "", "Picture": "", "SelectedMeaning": "<b>sleeping cat</b>"}}}}).json()
+                     "modelName": "Japanese", "tags": ["yomitan"],
+                     "fields": {"Expression": "猫", "Sentence": "", "SentenceAudio": "", "Picture": "", "SelectedMeaning": "<b>sleeping cat</b>"}}}}).json()
         except Exception as exc:
             result["error"] = str(exc)
 
@@ -81,6 +88,7 @@ def test_http_opens_picker_and_selection_returns_note_id(tmp_path, order):
         assert picker.closed
         assert sum(call["action"] == "addNote" for call in calls) == 1
         assert calls[-1]["params"]["note"]["fields"]["SentenceAudio"] == "[sound:cat.mp3]"
+        assert calls[-1]["params"]["note"]["tags"] == ["yomitan", "added"]
         if with_image:
             assert '<img src="cat.mp3">' in calls[-1]["params"]["note"]["fields"]["Picture"]
     finally:
@@ -90,7 +98,32 @@ def test_http_opens_picker_and_selection_returns_note_id(tmp_path, order):
         app.processEvents()
 
 
-def test_small_windows_scroll_and_can_grow(tmp_path, monkeypatch):
+def test_tags_setting_is_saved_per_model(tmp_path, monkeypatch):
+    from koeminer.proxy import Proxy
+    monkeypatch.setattr(Proxy, "start", lambda _: None)
+    monkeypatch.setattr(Proxy, "stop", lambda _: None)
+    app = QApplication.instance() or QApplication([])
+    Settings(profiles={"Japanese": Mapping(tags="old"), "Other": Mapping(tags="other")}).save(tmp_path / "settings.json")
+    window = MainWindow(tmp_path)
+    try:
+        assert window.tags.text() == "old"
+        window.tags.setText("new, grammar")
+        window.save_settings()
+        assert window.settings_status.text() == "Сохранено для «Japanese»."
+        assert Settings.load(tmp_path / "settings.json").profiles["Japanese"].tags == "new, grammar"
+        window.models.setCurrentText("Other")
+        assert window.tags.text() == "other"
+        window.models.setCurrentText("Japanese")
+        assert window.tags.text() == "new, grammar"
+    finally:
+        window.shutdown()
+        window.tray.hide()
+        window.deleteLater()
+        app.processEvents()
+
+
+@pytest.mark.parametrize("narrow_width", [360, 420])
+def test_small_windows_scroll_and_can_grow(tmp_path, monkeypatch, narrow_width):
     from koeminer.proxy import Proxy
     monkeypatch.setattr(Proxy, "start", lambda _: None)
     monkeypatch.setattr(Proxy, "stop", lambda _: None)
@@ -101,22 +134,34 @@ def test_small_windows_scroll_and_can_grow(tmp_path, monkeypatch):
     window.show()
     window.preview()
     picker = window.pickers[0]
+    settings_tab = window.content_scroll.widget().findChild(QTabWidget)
+    settings_tab.setCurrentIndex(1)
+    window.models.addItem("Very long model name " * 20)
+    window.fields["expression"].addItem("Very long field name " * 20)
+    controls = (window.upstream, window.port, window.key, window.models, *window.fields.values(), window.tags)
     try:
         for widget in (window, picker):
-            widget.resize(420, 320)
+            widget.resize(narrow_width, 320)
         for _ in range(10):
             app.processEvents()
+        assert window.width() == picker.width() == narrow_width
+        assert window.height() == picker.height() == 320
+        assert window.content_scroll.horizontalScrollBar().maximum() == 0
+        assert picker.content_scroll.horizontalScrollBar().maximum() > 0
+        assert window.content_scroll.verticalScrollBar().maximum() > 0
+        assert picker.content_scroll.verticalScrollBar().maximum() > 0
+        assert window.release_link.isVisible()
+        assert window.release_link.geometry().right() <= window.statusBar().width()
+        narrow = [control.width() for control in controls]
+        assert all(control.width() <= settings_tab.width() for control in controls)
         for widget in (window, picker):
-            assert widget.width() == 420
-            assert widget.height() == 320
-            assert widget.content_scroll.horizontalScrollBar().maximum() > 0
-            assert widget.content_scroll.verticalScrollBar().maximum() > 0
             widget.resize(1200, 1000)
         for _ in range(10):
             app.processEvents()
         for widget in (window, picker):
             assert widget.width() == 1200
             assert widget.content_scroll.horizontalScrollBar().maximum() == 0
+        assert all(control.width() > width for control, width in zip(controls, narrow))
     finally:
         window.shutdown()
         window.tray.hide()

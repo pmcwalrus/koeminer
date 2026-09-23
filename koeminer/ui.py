@@ -4,21 +4,34 @@ import copy
 import threading
 from pathlib import Path
 
+import httpx
 from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFormLayout, QFrame,
     QHBoxLayout, QGridLayout, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
-    QPushButton, QScrollArea, QSpinBox, QSystemTrayIcon, QTabWidget,
+    QPushButton, QScrollArea, QSizePolicy, QSpinBox, QSystemTrayIcon, QTabWidget,
     QVBoxLayout, QWidget,
 )
 
 from .core import AudioCache, Corpus, Mapping, Settings, enrich, plain
 from .proxy import Proxy, Selection
 from .images import ImageCache, ImageSearch
+from . import __version__
 
 STYLE = ""  # Use the operating system palette and standard Qt controls.
+RELEASE_URL = "https://github.com/pmcwalrus/koeminer/releases/latest"
+RELEASE_API_URL = "https://api.github.com/repos/pmcwalrus/koeminer/releases/latest"
+
+
+def latest_release_version():
+    response = httpx.get(RELEASE_API_URL, timeout=5, follow_redirects=True)
+    response.raise_for_status()
+    tag = response.json().get("tag_name")
+    if not isinstance(tag, str) or not tag.strip() or len(tag) > 64:
+        raise ValueError("GitHub не вернул версию релиза.")
+    return tag.strip()
 
 
 def label(text, name=None):
@@ -528,10 +541,16 @@ class MainWindow(QMainWindow):
         tabs.addTab(self.settings_widget(), "Настройки")
         layout.addWidget(tabs, 1)
         layout.addWidget(label("Sentence Search · аудио сохраняется в медиатеке Anki для офлайн-повторения", "muted"))
-        root.setMinimumSize(640, 700)
+        root.setMinimumHeight(700)
         self.content_scroll = scrollable(root)
         self.setCentralWidget(self.content_scroll)
         self.setMinimumSize(360, 280)
+        self.version_info = label(f"Текущая: v{__version__} · Последняя: проверяется…")
+        self.statusBar().addPermanentWidget(self.version_info)
+        self.release_link = QLabel(f'<a href="{RELEASE_URL}">Скачать последнюю версию</a>')
+        self.release_link.setOpenExternalLinks(True)
+        self.statusBar().addPermanentWidget(self.release_link)
+        QTimer.singleShot(0, self.check_latest_release)
         self.tray = QSystemTrayIcon(self.windowIcon(), self)
         self.tray.setToolTip("koeminer")
         menu = QMenu(self)
@@ -553,6 +572,15 @@ class MainWindow(QMainWindow):
 
     def set_status(self, text):
         self.status.setText(text)
+
+    def check_latest_release(self):
+        self.jobs.run(latest_release_version, self.show_latest_release,
+                      lambda _: self.version_info.setText(f"Текущая: v{__version__} · Последняя: недоступна"))
+
+    def show_latest_release(self, version):
+        self.version_info.setToolTip(f"Текущая: v{__version__} · Последняя: {version}")
+        display = version if len(version) <= 18 else version[:17] + "…"
+        self.version_info.setText(f"Текущая: v{__version__} · Последняя: {display}")
 
     def reveal(self):
         self.showNormal()
@@ -579,20 +607,25 @@ class MainWindow(QMainWindow):
         widget = QWidget()
         form = QFormLayout(widget)
         form.setVerticalSpacing(8)
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
         self.upstream = QLineEdit(self.settings.upstream)
         self.port = QSpinBox()
         self.port.setRange(1024, 65535)
         self.port.setValue(self.settings.port)
         self.key = QLineEdit(self.settings.api_key)
         self.key.setEchoMode(QLineEdit.EchoMode.Password)
-        form.addRow("Адрес AnkiConnect", self.upstream)
-        form.addRow("Порт koeminer", self.port)
-        form.addRow("API-ключ AnkiConnect (если задан)", self.key)
+        form.addRow(label("Адрес AnkiConnect"), self.upstream)
+        form.addRow(label("Порт koeminer"), self.port)
+        form.addRow(label("API-ключ AnkiConnect (если задан)"), self.key)
         self.models = QComboBox()
         self.models.setEditable(True)
+        self.models.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.models.setMinimumContentsLength(8)
         self.models.addItems(list(self.settings.profiles))
-        self.models.setPlaceholderText("Загрузите из Anki или введите имя типа заметки")
-        form.addRow("Тип заметки", self.models)
+        self.models.setPlaceholderText("Имя типа заметки")
+        self.models.setToolTip("Загрузите из Anki или введите имя типа заметки")
+        form.addRow(label("Тип заметки"), self.models)
         form.addRow(button("Загрузить типы и поля из Anki", self.load_models))
         self.fields = {}
         for key, title in [("expression", "Поле слова / кандзи"), ("sentence", "Поле предложения"),
@@ -601,9 +634,16 @@ class MainWindow(QMainWindow):
                            ("image_query", "Поле выделенного текста для картинок")]:
             combo = QComboBox()
             combo.setEditable(True)
+            combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+            combo.setMinimumContentsLength(8)
             self.fields[key] = combo
-            form.addRow(title, combo)
-        self.append = QCheckBox("Добавлять к содержимому полей вместо замены")
+            form.addRow(label(title), combo)
+        self.append = QCheckBox("Добавлять к полям вместо замены")
+        self.tags = QLineEdit()
+        self.tags.setPlaceholderText("Например: японский, предложения")
+        form.addRow(label("Дополнительные теги (через запятую)"), self.tags)
+        for control in (self.upstream, self.port, self.key, self.models, *self.fields.values(), self.tags):
+            control.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         form.addRow(label("В Yomitan назначьте этому полю маркер {popup-selection-text}. "
                           "Выделяйте текст внутри окна Yomitan перед нажатием +. "
                           "Если поле пустое или отсутствует, картинки ищутся по слову.", "muted"))
@@ -629,6 +669,7 @@ class MainWindow(QMainWindow):
         for key, combo in self.fields.items():
             combo.setCurrentText(getattr(mapping, key))
         self.append.setChecked(mapping.append)
+        self.tags.setText(mapping.tags)
 
     def load_models(self):
         try:
@@ -671,7 +712,8 @@ class MainWindow(QMainWindow):
             name = self.models.currentText().strip()
             if not name:
                 raise ValueError("Укажите тип заметки Anki.")
-            mapping = Mapping(**{key: combo.currentText().strip() for key, combo in self.fields.items()}, append=self.append.isChecked())
+            mapping = Mapping(**{key: combo.currentText().strip() for key, combo in self.fields.items()},
+                              append=self.append.isChecked(), tags=self.tags.text().strip())
             mapping.validate()
             settings.profiles[name] = mapping
             settings.validate()

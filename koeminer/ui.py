@@ -608,7 +608,7 @@ class MainWindow(QMainWindow):
         form = QFormLayout(widget)
         form.setVerticalSpacing(8)
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
-        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapLongRows)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.WrapAllRows)
         self.upstream = QLineEdit(self.settings.upstream)
         self.port = QSpinBox()
         self.port.setRange(1024, 65535)
@@ -638,7 +638,7 @@ class MainWindow(QMainWindow):
             combo.setMinimumContentsLength(8)
             self.fields[key] = combo
             form.addRow(label(title), combo)
-        self.append = QCheckBox("Добавлять к полям вместо замены")
+        self.append = QCheckBox("Добавлять вместо замены")
         self.tags = QLineEdit()
         self.tags.setPlaceholderText("Например: японский, предложения")
         form.addRow(label("Дополнительные теги (через запятую)"), self.tags)

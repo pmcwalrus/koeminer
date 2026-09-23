@@ -626,7 +626,9 @@ class MainWindow(QMainWindow):
         self.models.setPlaceholderText("Имя типа заметки")
         self.models.setToolTip("Загрузите из Anki или введите имя типа заметки")
         form.addRow(label("Тип заметки"), self.models)
-        form.addRow(button("Загрузить типы и поля из Anki", self.load_models))
+        load_button = button("Загрузить из Anki", self.load_models)
+        load_button.setToolTip("Загрузить типы заметок и поля из Anki")
+        form.addRow(load_button)
         self.fields = {}
         for key, title in [("expression", "Поле слова / кандзи"), ("sentence", "Поле предложения"),
                            ("audio", "Поле аудио предложения"), ("translation", "Поле перевода (необязательно)"),
@@ -638,7 +640,8 @@ class MainWindow(QMainWindow):
             combo.setMinimumContentsLength(8)
             self.fields[key] = combo
             form.addRow(label(title), combo)
-        self.append = QCheckBox("Добавлять вместо замены")
+        self.append = QCheckBox("Дополнять поля")
+        self.append.setToolTip("Добавлять к содержимому полей вместо замены")
         self.tags = QLineEdit()
         self.tags.setPlaceholderText("Например: японский, предложения")
         form.addRow(label("Дополнительные теги (через запятую)"), self.tags)

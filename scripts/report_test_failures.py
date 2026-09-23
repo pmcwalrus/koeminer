@@ -1,4 +1,5 @@
 """Surface pytest failures as public GitHub Actions annotations when job logs are unavailable."""
+import sys
 from pathlib import Path
 from xml.etree import ElementTree
 
@@ -21,4 +22,9 @@ def report(path: Path):
 
 
 if __name__ == "__main__":
-    report(Path("pytest-results.xml"))
+    sys.stdout.reconfigure(encoding="utf-8")
+    try:
+        report(Path("pytest-results.xml"))
+    except Exception as exc:
+        details = f"{type(exc).__name__}: {exc}".encode("ascii", "backslashreplace").decode("ascii")
+        print(f"::error title=pytest report::Failed to parse test results: {details}")

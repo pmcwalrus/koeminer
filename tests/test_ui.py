@@ -16,7 +16,7 @@ from koeminer.ui import MainWindow
 
 @pytest.fixture(autouse=True)
 def stub_github_release(monkeypatch):
-    monkeypatch.setattr("koeminer.ui.latest_release_version", lambda: "v0.4.0")
+    monkeypatch.setattr("koeminer.ui.latest_release_version", lambda: "v0.4.1")
 
 
 @pytest.mark.parametrize("order", ["audio_only", "audio_first", "image_first"])

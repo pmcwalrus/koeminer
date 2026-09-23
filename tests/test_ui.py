@@ -146,10 +146,14 @@ def test_small_windows_scroll_and_can_grow(tmp_path, monkeypatch, narrow_width):
             app.processEvents()
         assert window.width() == picker.width() == narrow_width
         assert window.height() == picker.height() == 320
+        form = settings_tab.widget(1).layout()
+        widgets = [(type(item.widget()).__name__, item.widget().minimumSizeHint().width(),
+                    item.widget().text()[:40] if hasattr(item.widget(), "text") else "")
+                   for item in (form.itemAt(i) for i in range(form.count())) if item.widget()]
         assert window.content_scroll.horizontalScrollBar().maximum() == 0, (
             f"root={window.content_scroll.widget().minimumSizeHint().width()}, "
             f"settings={settings_tab.widget(1).minimumSizeHint().width()}, "
-            f"controls={[(type(control).__name__, control.minimumSizeHint().width()) for control in controls]}")
+            f"widgets={widgets}")
         assert picker.content_scroll.horizontalScrollBar().maximum() > 0
         assert window.content_scroll.verticalScrollBar().maximum() > 0
         assert picker.content_scroll.verticalScrollBar().maximum() > 0

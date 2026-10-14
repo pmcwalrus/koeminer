@@ -8,7 +8,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import httpx
 import pytest
-from PySide6.QtWidgets import QApplication, QFormLayout, QTabWidget
+from PySide6.QtWidgets import QApplication, QFileDialog, QFormLayout, QMessageBox, QTabWidget
 
 from koeminer.core import Mapping, Sentence, Settings
 from koeminer.ui import MainWindow
@@ -16,7 +16,7 @@ from koeminer.ui import MainWindow
 
 @pytest.fixture(autouse=True)
 def stub_github_release(monkeypatch):
-    monkeypatch.setattr("koeminer.ui.latest_release_version", lambda: "v0.4.2")
+    monkeypatch.setattr("koeminer.ui.latest_release_version", lambda: "v0.4.3")
 
 
 @pytest.mark.parametrize("order", ["audio_only", "audio_first", "image_first"])
@@ -115,6 +115,140 @@ def test_tags_setting_is_saved_per_model(tmp_path, monkeypatch):
         assert window.tags.text() == "other"
         window.models.setCurrentText("Japanese")
         assert window.tags.text() == "new, grammar"
+    finally:
+        window.shutdown()
+        window.tray.hide()
+        window.deleteLater()
+        app.processEvents()
+
+
+def test_config_export_import_updates_ui_and_proxy_without_losing_profiles(tmp_path, monkeypatch):
+    from koeminer.proxy import Proxy
+    monkeypatch.setattr(Proxy, "start", lambda _: None)
+    monkeypatch.setattr(Proxy, "stop", lambda _: None)
+    app = QApplication.instance() or QApplication([])
+    original = Settings(profiles={"Japanese": Mapping(tags="old")})
+    original.save(tmp_path / "settings.json")
+    window = MainWindow(tmp_path)
+    backup = tmp_path / "my config.koe"
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(backup), ""))
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *args: (str(backup), ""))
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Yes)
+    try:
+        window.tags.setText("unsaved")
+        window.export_settings()
+        assert Settings.load_backup(backup) == original
+        assert "Несохранённые изменения не включены" in window.settings_status.text()
+        replacement = Settings(port=9876, upstream="http://localhost:8765", api_key="secret",
+                               profiles={"Imported": Mapping(expression="Word", tags="new"), "Other": Mapping()})
+        replacement.save_backup(backup)
+        window.models_loaded({"Japanese": ["Expression", "Sentence", "SentenceAudio"]})
+        window.import_settings()
+        assert window.settings == replacement == window.proxy.settings == Settings.load(tmp_path / "settings.json")
+        assert window.upstream.text() == replacement.upstream
+        assert window.port.value() == 9876
+        assert window.key.text() == "secret"
+        assert window.address.text().endswith(":9876")
+        assert [window.models.itemText(i) for i in range(window.models.count())] == ["Imported", "Other"]
+        assert window.fields["expression"].currentText() == "Word"
+        assert window.tags.text() == "new"
+        window.models.setCurrentText("Other")
+        assert window.tags.text() == ""
+        window.models.setCurrentText("Imported")
+        assert window.tags.text() == "new"
+        window.tags.setText("updated")
+        window.save_settings()
+        saved = Settings.load(tmp_path / "settings.json")
+        assert saved.profiles["Imported"].tags == "updated"
+        assert saved.profiles["Other"] == replacement.profiles["Other"]
+    finally:
+        window.shutdown()
+        window.tray.hide()
+        window.deleteLater()
+        app.processEvents()
+
+
+def test_config_import_cancel_invalid_and_busy_leave_settings_untouched(tmp_path, monkeypatch):
+    from koeminer.proxy import Proxy
+    monkeypatch.setattr(Proxy, "start", lambda _: None)
+    monkeypatch.setattr(Proxy, "stop", lambda _: None)
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(tmp_path)
+    backup = tmp_path / "settings.koe"
+    Settings(port=9876, profiles={"Imported": Mapping()}).save_backup(backup)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *args: (str(backup), ""))
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.No)
+    try:
+        window.import_settings()
+        assert window.settings.port == 8766
+        assert not (tmp_path / "settings.json").exists()
+        monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Yes)
+        backup.write_text("{}", encoding="utf-8")
+        window.import_settings()
+        assert "не файл конфигурации" in window.settings_status.text()
+        assert window.proxy.settings is window.settings
+        Settings(port=9876).save_backup(backup)
+        window.proxy.selection_lock.acquire()
+        try:
+            window.import_settings()
+            assert "Завершите создание карточки" in window.settings_status.text()
+        finally:
+            window.proxy.selection_lock.release()
+        assert window.settings.port == 8766
+        assert not (tmp_path / "settings.json").exists()
+    finally:
+        window.shutdown()
+        window.tray.hide()
+        window.deleteLater()
+        app.processEvents()
+
+
+def test_config_export_adds_koe_suffix_and_does_not_replace_without_confirmation(tmp_path, monkeypatch):
+    from koeminer.proxy import Proxy
+    monkeypatch.setattr(Proxy, "start", lambda _: None)
+    monkeypatch.setattr(Proxy, "stop", lambda _: None)
+    app = QApplication.instance() or QApplication([])
+    window = MainWindow(tmp_path)
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *args: (str(tmp_path / "backup"), ""))
+    backup = tmp_path / "backup.koe"
+    try:
+        window.export_settings()
+        assert Settings.load_backup(backup) == window.settings
+        backup.write_text("keep", encoding="utf-8")
+        monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.No)
+        window.export_settings()
+        assert backup.read_text(encoding="utf-8") == "keep"
+    finally:
+        window.shutdown()
+        window.tray.hide()
+        window.deleteLater()
+        app.processEvents()
+
+
+def test_config_import_reverts_on_proxy_restart_failure(tmp_path, monkeypatch):
+    from koeminer.proxy import Proxy
+    starts = []
+    def start(proxy):
+        starts.append(proxy.settings.port)
+        if proxy.settings.port == 9876:
+            raise OSError("порт занят")
+    monkeypatch.setattr(Proxy, "start", start)
+    monkeypatch.setattr(Proxy, "stop", lambda _: None)
+    app = QApplication.instance() or QApplication([])
+    original = Settings(profiles={"Japanese": Mapping(tags="original")})
+    original.save(tmp_path / "settings.json")
+    backup = tmp_path / "settings.koe"
+    Settings(port=9876, profiles={"Other": Mapping()}).save_backup(backup)
+    window = MainWindow(tmp_path)
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", lambda *args: (str(backup), ""))
+    monkeypatch.setattr(QMessageBox, "question", lambda *args: QMessageBox.StandardButton.Yes)
+    try:
+        window.import_settings()
+        assert "порт занят" in window.settings_status.text()
+        assert window.settings == window.proxy.settings == Settings.load(tmp_path / "settings.json") == original
+        assert window.models.currentText() == "Japanese"
+        assert window.port.value() == original.port
+        assert starts == [original.port, 9876, original.port]
     finally:
         window.shutdown()
         window.tray.hide()

@@ -63,6 +63,25 @@ def test_profiles_roundtrip_and_loop_prevention(tmp_path):
         settings.validate()
 
 
+def test_config_backup_roundtrip_and_rejects_other_files(tmp_path):
+    settings = Settings(upstream="http://localhost:8765", api_key="private-key", profiles={
+        "日本語": Mapping(expression="Word", image="Picture", tags="a, b"),
+        "Other": Mapping(append=True),
+    })
+    path = tmp_path / "config.koe"
+    settings.save_backup(path)
+    assert Settings.load_backup(path) == settings
+    assert json.loads(path.read_text(encoding="utf-8"))["format"] == "koeminer-config"
+    assert "private-key" in path.read_text(encoding="utf-8")
+    invalid = tmp_path / "invalid.koe"
+    invalid.write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="не файл конфигурации"):
+        Settings.load_backup(invalid)
+    invalid.write_text('{"format": "koeminer-config", "version": 99, "settings": {}}', encoding="utf-8")
+    with pytest.raises(ValueError, match="не файл конфигурации"):
+        Settings.load_backup(invalid)
+
+
 def test_search_literal_and_sort(tmp_path):
     path = tmp_path / "sentences.json"
     path.write_text(json.dumps([

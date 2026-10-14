@@ -59,11 +59,32 @@ class Settings:
         if not path.exists():
             return cls()
         data = json.loads(path.read_text(encoding="utf-8"))
+        return cls.from_dict(data)
+
+    @classmethod
+    def from_dict(cls, data: dict):
+        data = data.copy()
         data.pop("serpapi_key", None)  # Discard the removed provider key on migration.
         data["profiles"] = {k: Mapping(**v) for k, v in data.get("profiles", {}).items()}
         settings = cls(**data)
         settings.validate()
         return settings
+
+    @classmethod
+    def load_backup(cls, path: Path):
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if (not isinstance(data, dict) or data.get("format") != "koeminer-config"
+                or data.get("version") != 1 or not isinstance(data.get("settings"), dict)):
+            raise ValueError("Это не файл конфигурации koeminer (.koe).")
+        return cls.from_dict(data["settings"])
+
+    def save_backup(self, path: Path):
+        self.validate()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({"format": "koeminer-config", "version": 1, "settings": asdict(self)},
+                                  ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp.replace(path)
 
     def save(self, path: Path):
         self.validate()

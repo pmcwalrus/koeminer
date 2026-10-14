@@ -10,7 +10,7 @@ from PySide6.QtCore import QObject, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QFormLayout, QFrame,
+    QApplication, QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QFrame,
     QHBoxLayout, QGridLayout, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
     QPushButton, QScrollArea, QSizePolicy, QSpinBox, QSystemTrayIcon, QTabWidget,
     QVBoxLayout, QWidget,
@@ -664,6 +664,9 @@ class MainWindow(QMainWindow):
         form.addRow(self.append)
         form.addRow(label("Имена полей должны точно совпадать с Anki. В шаблоне карточки должны отображаться поля предложения и аудио.", "muted"))
         form.addRow(button("Сохранить настройки", self.save_settings, True))
+        form.addRow(button("Сохранить в .koe", self.export_settings))
+        form.addRow(button("Восстановить из .koe", self.import_settings))
+        form.addRow(label("Файл .koe содержит все сохранённые настройки, включая API-ключ. Храните его в безопасном месте.", "muted"))
         self.settings_status = label("", "muted")
         form.addRow(self.settings_status)
         self.models.currentTextChanged.connect(self.model_changed)
@@ -730,21 +733,75 @@ class MainWindow(QMainWindow):
                               append=self.append.isChecked(), tags=self.tags.text().strip())
             mapping.validate()
             settings.profiles[name] = mapping
-            settings.validate()
-            old_settings = self.settings
-            self.proxy.stop()
-            self.proxy.settings = settings
-            try:
-                self.proxy.start()
-                settings.save(self.config_path)
-            except Exception:
-                self.proxy.stop()
-                self.proxy.settings = old_settings
-                self.proxy.start()
-                raise
-            self.settings = settings
-            self.address.setText(f"Адрес для Yomitan: http://127.0.0.1:{settings.port}")
+            self.apply_settings(settings)
             self.settings_status.setText(f"Сохранено для «{name}».")
+        except Exception as exc:
+            self.settings_status.setText(str(exc))
+
+    def apply_settings(self, settings):
+        settings.validate()
+        old_settings = self.settings
+        self.proxy.stop()
+        self.proxy.settings = settings
+        try:
+            self.proxy.start()
+            settings.save(self.config_path)
+        except Exception:
+            self.proxy.stop()
+            self.proxy.settings = old_settings
+            self.proxy.start()
+            raise
+        self.settings = settings
+        self.address.setText(f"Адрес для Yomitan: http://127.0.0.1:{settings.port}")
+
+    def export_settings(self):
+        path, _ = QFileDialog.getSaveFileName(self, "Сохранить конфиг", "koeminer.koe", "Конфиг koeminer (*.koe)")
+        if not path:
+            return
+        try:
+            target = Path(path)
+            if not target.suffix:
+                target = target.with_suffix(".koe")
+                if target.exists() and QMessageBox.question(
+                        self, "Заменить файл?", f"Файл {target.name} уже существует. Заменить его?") != QMessageBox.StandardButton.Yes:
+                    return
+            if target.suffix.lower() != ".koe":
+                raise ValueError("Выберите файл с расширением .koe.")
+            self.settings.save_backup(target)
+            self.settings_status.setText(f"Конфиг сохранён: {target.name}. Несохранённые изменения не включены.")
+        except Exception as exc:
+            self.settings_status.setText(str(exc))
+
+    def import_settings(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Восстановить конфиг", "", "Конфиг koeminer (*.koe)")
+        if not path:
+            return
+        try:
+            if self.proxy.selection_lock.locked():
+                raise ValueError("Завершите создание карточки перед изменением настроек.")
+            source = Path(path)
+            if source.suffix.lower() != ".koe":
+                raise ValueError("Выберите файл с расширением .koe.")
+            settings = Settings.load_backup(source)
+            if QMessageBox.question(self, "Восстановить конфиг",
+                                    "Заменить текущие настройки данными из файла? Несохранённые изменения будут потеряны.") != QMessageBox.StandardButton.Yes:
+                return
+            self.apply_settings(settings)
+            self.upstream.setText(settings.upstream)
+            self.port.setValue(settings.port)
+            self.key.setText(settings.api_key)
+            if getattr(self, "fields_connected", False):
+                self.models.currentTextChanged.disconnect(self.populate_fields)
+                self.fields_connected = False
+            self.models.blockSignals(True)
+            self.models.clear()
+            self.models.addItems(list(settings.profiles))
+            self.models.setCurrentText(next(iter(settings.profiles), ""))
+            self.models.blockSignals(False)
+            for combo in self.fields.values():
+                combo.clear()
+            self.model_changed(self.models.currentText())
+            self.settings_status.setText(f"Конфиг восстановлен: {source.name}.")
         except Exception as exc:
             self.settings_status.setText(str(exc))
 
